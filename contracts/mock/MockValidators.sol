@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.6.0 <0.8.0;
 
 import "../Proposal.sol";
@@ -34,11 +35,11 @@ contract MockValidators {
         return false;
     }
 
-    function setUnpassed(address who) public {
-        proposal.setUnpassed(who);
+    function setUnPassed(address who) public {
+        proposal.setUnPassed(who);
     }
 
-    function tryReactive(address who) public returns (bool) {
+    function tryReactive() public pure returns (bool) {
         return true;
     }
 }
