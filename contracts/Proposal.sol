@@ -6,7 +6,7 @@ import "./Validators.sol";
 
 contract Proposal is Params {
     // How long a proposal will exist
-    uint256 public proposalLastingPeriod;
+    uint256 public constant proposalLastingPeriod = 7 days;
 
     // record
     mapping(address => bool) public pass;
@@ -72,7 +72,6 @@ contract Proposal is Params {
     }
 
     function initialize(address[] calldata vals) external onlyNotInitialized {
-        proposalLastingPeriod = 7 days;
         validators = Validators(ValidatorContractAddr);
 
         for (uint256 i = 0; i < vals.length; i++) {

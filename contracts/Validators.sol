@@ -140,7 +140,7 @@ contract Validators is Params {
     }
 
     function initialize(address[] calldata vals) external onlyNotInitialized {
-        proposal = Proposal(ProposalAddr);
+        proposal = Proposal(ProposalContractAddr);
         punish = Punish(PunishContractAddr);
 
         for (uint256 i = 0; i < vals.length; i++) {

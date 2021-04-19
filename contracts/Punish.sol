@@ -5,9 +5,9 @@ import "./Params.sol";
 import "./Validators.sol";
 
 contract Punish is Params {
-    uint256 public punishThreshold;
-    uint256 public removeThreshold;
-    uint256 public decreaseRate;
+    uint16 public constant punishThreshold = 24;
+    uint16 public constant removeThreshold = 48;
+    uint16 public constant decreaseRate = 24;
 
     struct PunishRecord {
         uint256 missedBlocksCounter;
@@ -38,10 +38,6 @@ contract Punish is Params {
 
     function initialize() external onlyNotInitialized {
         validators = Validators(ValidatorContractAddr);
-        punishThreshold = 24;
-        removeThreshold = 48;
-        decreaseRate = 24;
-
         initialized = true;
     }
 

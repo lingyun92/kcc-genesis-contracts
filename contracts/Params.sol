@@ -7,7 +7,7 @@ contract Params {
     // System contracts
     address public constant ValidatorContractAddr = 0x000000000000000000000000000000000000f000;
     address public constant PunishContractAddr = 0x000000000000000000000000000000000000f111;
-    address public constant ProposalAddr = 0x000000000000000000000000000000000000f222;
+    address public constant ProposalContractAddr = 0x000000000000000000000000000000000000f222;
 
     // FeeRecoder
     address public constant FeeRecoder = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
@@ -54,7 +54,7 @@ contract Params {
     }
 
     modifier onlyProposalContract() {
-        require(msg.sender == ProposalAddr, "Proposal contract only");
+        require(msg.sender == ProposalContractAddr, "Proposal contract only");
         _;
     }
 }
