@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.6.0 <0.8.0;
 
 import "./Params.sol";
@@ -5,7 +6,7 @@ import "./Validators.sol";
 
 contract Proposal is Params {
     // How long a proposal will exist
-    uint256 public proposalLastingPeriod;
+    uint256 public constant proposalLastingPeriod = 7 days;
 
     // record
     mapping(address => bool) public pass;
@@ -63,7 +64,7 @@ contract Proposal is Params {
         address indexed dst,
         uint256 time
     );
-    event LogSetUnpassed(address indexed val, uint256 time);
+    event LogSetUnPassed(address indexed val, uint256 time);
 
     modifier onlyValidator() {
         require(validators.isActiveValidator(msg.sender), "Validator only");
@@ -71,7 +72,6 @@ contract Proposal is Params {
     }
 
     function initialize(address[] calldata vals) external onlyNotInitialized {
-        proposalLastingPeriod = 7 days;
         validators = Validators(ValidatorContractAddr);
 
         for (uint256 i = 0; i < vals.length; i++) {
@@ -163,7 +163,7 @@ contract Proposal is Params {
         return true;
     }
 
-    function setUnpassed(address val)
+    function setUnPassed(address val)
         external
         onlyValidatorsContract
         returns (bool)
@@ -171,7 +171,7 @@ contract Proposal is Params {
         // set validator unpass
         pass[val] = false;
 
-        emit LogSetUnpassed(val, block.timestamp);
+        emit LogSetUnPassed(val, block.timestamp);
         return true;
     }
 }

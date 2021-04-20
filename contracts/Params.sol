@@ -1,18 +1,19 @@
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.6.0 <0.8.0;
 
 contract Params {
     bool public initialized;
 
     // System contracts
-    address
-        public constant ValidatorContractAddr = 0x000000000000000000000000000000000000f000;
-    address
-        public constant PunishContractAddr = 0x000000000000000000000000000000000000F001;
-    address
-        public constant ProposalAddr = 0x000000000000000000000000000000000000F002;
+    address public constant ValidatorContractAddr = 0x000000000000000000000000000000000000f000;
+    address public constant PunishContractAddr = 0x000000000000000000000000000000000000f111;
+    address public constant ProposalContractAddr = 0x000000000000000000000000000000000000f222;
+
+    // FeeRecoder
+    address public constant FeeRecoder = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
 
     // System params
-    uint16 public constant MaxValidators = 21;
+    uint16 public constant MaxValidators = 29;
     // Validator have to wait StakingLockPeriod blocks to withdraw staking
     uint64 public constant StakingLockPeriod = 86400;
     // Validator have to wait WithdrawProfitPeriod blocks to withdraw his profits
@@ -53,7 +54,7 @@ contract Params {
     }
 
     modifier onlyProposalContract() {
-        require(msg.sender == ProposalAddr, "Proposal contract only");
+        require(msg.sender == ProposalContractAddr, "Proposal contract only");
         _;
     }
 }

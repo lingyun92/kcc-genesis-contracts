@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity >=0.6.0 <0.8.0;
 
 import "./Params.sol";
@@ -16,8 +17,8 @@ contract Validators is Params {
         // anyone has staked for the validator
         Staked,
         // validator's staked coins < MinimalStakingCoin
-        Unstaked,
-        // validator is jailed by system(validator have to repropose)
+        UnStaked,
+        // validator is jailed by system(validator have to re-propose)
         Jailed
     }
 
@@ -34,8 +35,8 @@ contract Validators is Params {
         Status status;
         uint256 coins;
         Description description;
-        uint256 hbIncoming;
-        uint256 totalJailedHB;
+        uint256 Income;
+        uint256 totalJailed;
         uint256 lastWithdrawProfitsBlock;
         // Address list of user who has staked for this validator
         address[] stakers;
@@ -43,9 +44,9 @@ contract Validators is Params {
 
     struct StakingInfo {
         uint256 coins;
-        // unstakeBlock != 0 means that you are unstaking your stake, so you can't
-        // stake or unstake
-        uint256 unstakeBlock;
+        // unStakeBlock != 0 means that you are un-staking your stake,
+        // so you can't stake or unStake
+        uint256 unStakeBlock;
         // index of the staker list in validator
         uint256 index;
     }
@@ -60,8 +61,8 @@ contract Validators is Params {
     address[] public highestValidatorsSet;
     // total stake of all validators
     uint256 public totalStake;
-    // total jailed hb
-    uint256 public totalJailedHB;
+    // total jailed amt
+    uint256 public totalJailed;
 
     // System contracts
     Proposal proposal;
@@ -84,7 +85,7 @@ contract Validators is Params {
     event LogReactive(address indexed val, uint256 time);
     event LogAddToTopValidators(address indexed val, uint256 time);
     event LogRemoveFromTopValidators(address indexed val, uint256 time);
-    event LogUnstake(
+    event LogUnStake(
         address indexed staker,
         address indexed val,
         uint256 amount,
@@ -99,13 +100,13 @@ contract Validators is Params {
     event LogWithdrawProfits(
         address indexed val,
         address indexed fee,
-        uint256 hb,
+        uint256 amt,
         uint256 time
     );
-    event LogRemoveValidator(address indexed val, uint256 hb, uint256 time);
+    event LogRemoveValidator(address indexed val, uint256 amt, uint256 time);
     event LogRemoveValidatorIncoming(
         address indexed val,
-        uint256 hb,
+        uint256 amt,
         uint256 time
     );
     event LogDistributeBlockReward(
@@ -139,7 +140,7 @@ contract Validators is Params {
     }
 
     function initialize(address[] calldata vals) external onlyNotInitialized {
-        proposal = Proposal(ProposalAddr);
+        proposal = Proposal(ProposalContractAddr);
         punish = Punish(PunishContractAddr);
 
         for (uint256 i = 0; i < vals.length; i++) {
@@ -183,7 +184,7 @@ contract Validators is Params {
             "The validator you want to stake must be authorized first"
         );
         require(
-            staked[staker][validator].unstakeBlock == 0,
+            staked[staker][validator].unStakeBlock == 0,
             "Can't stake when you are unstaking"
         );
 
@@ -264,9 +265,9 @@ contract Validators is Params {
         onlyInitialized
         returns (bool)
     {
-        // Only update validator status if Unstaked/Jailed
+        // Only update validator status if UnStaked/Jailed
         if (
-            validatorInfo[validator].status != Status.Unstaked &&
+            validatorInfo[validator].status != Status.UnStaked &&
             validatorInfo[validator].status != Status.Jailed
         ) {
             return true;
@@ -278,9 +279,11 @@ contract Validators is Params {
         validatorInfo[validator].status = Status.Created;
 
         emit LogReactive(validator, block.timestamp);
+
+        return true;
     }
 
-    function unstake(address validator)
+    function unStake(address validator)
         external
         onlyInitialized
         returns (bool)
@@ -293,19 +296,19 @@ contract Validators is Params {
 
         StakingInfo storage stakingInfo = staked[staker][validator];
         Validator storage valInfo = validatorInfo[validator];
-        uint256 unstakeAmount = stakingInfo.coins;
+        uint256 unStakeAmount = stakingInfo.coins;
 
         require(
-            stakingInfo.unstakeBlock == 0,
+            stakingInfo.unStakeBlock == 0,
             "You are already in unstaking status"
         );
-        require(unstakeAmount > 0, "You don't have any stake");
+        require(unStakeAmount > 0, "You don't have any stake");
         // You can't unstake if the validator is the only one top validator and
         // this unstake operation will cause staked coins of validator < MinimalStakingCoin
         require(
             !(highestValidatorsSet.length == 1 &&
                 isTopValidator(validator) &&
-                valInfo.coins.sub(unstakeAmount) < MinimalStakingCoin),
+                valInfo.coins.sub(unStakeAmount) < MinimalStakingCoin),
             "You can't unstake, validator list will be empty after this operation!"
         );
 
@@ -320,23 +323,23 @@ contract Validators is Params {
         }
         valInfo.stakers.pop();
 
-        valInfo.coins = valInfo.coins.sub(unstakeAmount);
-        stakingInfo.unstakeBlock = block.number;
+        valInfo.coins = valInfo.coins.sub(unStakeAmount);
+        stakingInfo.unStakeBlock = block.number;
         stakingInfo.index = 0;
-        totalStake = totalStake.sub(unstakeAmount);
+        totalStake = totalStake.sub(unStakeAmount);
 
         // try to remove it out of active validator set if validator's coins < MinimalStakingCoin
         if (valInfo.coins < MinimalStakingCoin) {
-            valInfo.status = Status.Unstaked;
+            valInfo.status = Status.UnStaked;
             // it's ok if validator not in highest set
             tryRemoveValidatorInHighestSet(validator);
 
             // call proposal contract to set unpass.
             // validator have to repropose to rebecome a validator.
-            proposal.setUnpassed(validator);
+            proposal.setUnPassed(validator);
         }
 
-        emit LogUnstake(staker, validator, unstakeAmount, block.timestamp);
+        emit LogUnStake(staker, validator, unStakeAmount, block.timestamp);
         return true;
     }
 
@@ -347,17 +350,17 @@ contract Validators is Params {
             validatorInfo[validator].status != Status.NotExist,
             "validator not exist"
         );
-        require(stakingInfo.unstakeBlock != 0, "You have to unstake first");
+        require(stakingInfo.unStakeBlock != 0, "You have to unstake first");
         // Ensure staker can withdraw his staking back
         require(
-            stakingInfo.unstakeBlock + StakingLockPeriod <= block.number,
+            stakingInfo.unStakeBlock + StakingLockPeriod <= block.number,
             "Your staking haven't unlocked yet"
         );
         require(stakingInfo.coins > 0, "You don't have any stake");
 
         uint256 staking = stakingInfo.coins;
         stakingInfo.coins = 0;
-        stakingInfo.unstakeBlock = 0;
+        stakingInfo.unStakeBlock = 0;
 
         // send stake back to staker
         staker.transfer(staking);
@@ -383,22 +386,22 @@ contract Validators is Params {
                 block.number,
             "You must wait enough blocks to withdraw your profits after latest withdraw of this validator"
         );
-        uint256 hbIncoming = validatorInfo[validator].hbIncoming;
-        require(hbIncoming > 0, "You don't have any profits");
+        uint256 Income = validatorInfo[validator].Income;
+        require(Income > 0, "You don't have any profits");
 
         // update info
-        validatorInfo[validator].hbIncoming = 0;
+        validatorInfo[validator].Income = 0;
         validatorInfo[validator].lastWithdrawProfitsBlock = block.number;
 
         // send profits to fee address
-        if (hbIncoming > 0) {
-            feeAddr.transfer(hbIncoming);
+        if (Income > 0) {
+            feeAddr.transfer(Income);
         }
 
         emit LogWithdrawProfits(
             validator,
             feeAddr,
-            hbIncoming,
+            Income,
             block.timestamp
         );
 
@@ -415,7 +418,7 @@ contract Validators is Params {
     {
         operationsDone[block.number][uint8(Operations.Distribute)] = true;
         address val = msg.sender;
-        uint256 hb = msg.value;
+        uint256 amt = msg.value;
 
         // never reach this
         if (validatorInfo[val].status == Status.NotExist) {
@@ -423,28 +426,29 @@ contract Validators is Params {
         }
 
         // Jailed validator can't get profits.
-        addProfitsToActiveValidatorsByStakePercentExcept(hb, address(0));
+        addProfitsToActiveValidatorsByStakePercentExcept(amt, address(0));
 
-        emit LogDistributeBlockReward(val, hb, block.timestamp);
+        emit LogDistributeBlockReward(val, amt, block.timestamp);
     }
 
-    function updateActiveValidatorSet(address[] memory newSet, uint256 epoch)
+    function updateActiveValidatorSet(uint256 epoch)
         public
         onlyMiner
         onlyNotUpdated
         onlyInitialized
         onlyBlockEpoch(epoch)
     {
+        require(highestValidatorsSet.length > 0, "Validator set empty!");
+
         operationsDone[block.number][uint8(Operations.UpdateValidators)] = true;
-        require(newSet.length > 0, "Validator set empty!");
 
-        currentValidatorSet = newSet;
+        currentValidatorSet = highestValidatorsSet;
 
-        emit LogUpdateValidator(newSet);
+        emit LogUpdateValidator(currentValidatorSet);
     }
 
     function removeValidator(address val) external onlyPunishContract {
-        uint256 hb = validatorInfo[val].hbIncoming;
+        uint256 amt = validatorInfo[val].Income;
 
         tryRemoveValidatorIncoming(val);
 
@@ -455,8 +459,8 @@ contract Validators is Params {
 
             // call proposal contract to set unpass.
             // you have to repropose to be a validator.
-            proposal.setUnpassed(val);
-            emit LogRemoveValidator(val, hb, block.timestamp);
+            proposal.setUnPassed(val);
+            emit LogRemoveValidator(val, amt, block.timestamp);
         }
     }
 
@@ -505,8 +509,8 @@ contract Validators is Params {
             v.feeAddr,
             v.status,
             v.coins,
-            v.hbIncoming,
-            v.totalJailedHB,
+            v.Income,
+            v.totalJailed,
             v.lastWithdrawProfitsBlock,
             v.stakers
         );
@@ -523,7 +527,7 @@ contract Validators is Params {
     {
         return (
             staked[staker][val].coins,
-            staked[staker][val].unstakeBlock,
+            staked[staker][val].unStakeBlock,
             staked[staker][val].index
         );
     }
@@ -647,19 +651,19 @@ contract Validators is Params {
             return;
         }
 
-        uint256 hb = validatorInfo[val].hbIncoming;
-        if (hb > 0) {
-            addProfitsToActiveValidatorsByStakePercentExcept(hb, val);
+        uint256 amt = validatorInfo[val].Income;
+        if (amt > 0) {
+            addProfitsToActiveValidatorsByStakePercentExcept(amt, val);
             // for display purpose
-            totalJailedHB = totalJailedHB.add(hb);
-            validatorInfo[val].totalJailedHB = validatorInfo[val]
-                .totalJailedHB
-                .add(hb);
+            totalJailed = totalJailed.add(amt);
+            validatorInfo[val].totalJailed = validatorInfo[val]
+                .totalJailed
+                .add(amt);
 
-            validatorInfo[val].hbIncoming = 0;
+            validatorInfo[val].Income = 0;
         }
 
-        emit LogRemoveValidatorIncoming(val, hb, block.timestamp);
+        emit LogRemoveValidatorIncoming(val, amt, block.timestamp);
     }
 
     // add profits to all validators by stake percent except the punished validator or jailed validator
@@ -696,8 +700,8 @@ contract Validators is Params {
                     validatorInfo[val].status != Status.Jailed &&
                     val != punishedVal
                 ) {
-                    validatorInfo[val].hbIncoming = validatorInfo[val]
-                        .hbIncoming
+                    validatorInfo[val].Income = validatorInfo[val]
+                        .Income
                         .add(per);
 
                     last = val;
@@ -705,8 +709,8 @@ contract Validators is Params {
             }
 
             if (remain > 0 && last != address(0)) {
-                validatorInfo[last].hbIncoming = validatorInfo[last]
-                    .hbIncoming
+                validatorInfo[last].Income = validatorInfo[last]
+                    .Income
                     .add(remain);
             }
             return;
@@ -723,15 +727,15 @@ contract Validators is Params {
                 );
                 added = added.add(reward);
                 last = val;
-                validatorInfo[val].hbIncoming = validatorInfo[val]
-                    .hbIncoming
+                validatorInfo[val].Income = validatorInfo[val]
+                    .Income
                     .add(reward);
             }
         }
 
         remain = totalReward.sub(added);
         if (remain > 0 && last != address(0)) {
-            validatorInfo[last].hbIncoming = validatorInfo[last].hbIncoming.add(
+            validatorInfo[last].Income = validatorInfo[last].Income.add(
                 remain
             );
         }
