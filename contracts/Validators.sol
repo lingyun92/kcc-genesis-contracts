@@ -420,8 +420,6 @@ contract Validators is Params {
         address val = msg.sender;
         uint256 amt = msg.value;
 
-        require(amt == FeeRecoder.balance, "Bad Reward amount");
-
         // never reach this
         if (validatorInfo[val].status == Status.NotExist) {
             return;
