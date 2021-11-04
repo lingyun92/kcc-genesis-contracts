@@ -92,6 +92,8 @@ module.exports = {
     // timeout: 100000
   },
 
+  contracts_directory: "./contracts/v2/",
+
   // Configure your compilers
   compilers: {
     solc: {
