@@ -15,7 +15,7 @@ contract Params {
     uint16 public constant MaxValidators = 29;
 
     uint public constant PosMinMargin = 1000 ether; // 1000kcs
-    uint public constant PoaMinMargin = 32 ether; // 1kcs
+    uint public constant PoaMinMargin = 32 ether; // 32kcs
 
     uint public constant PunishAmount = 10 ether; // 10kcs
 
