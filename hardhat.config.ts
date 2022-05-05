@@ -97,7 +97,7 @@ const config: HardhatUserConfig = {
     },
     devnet:{
       url: process.env.DEVNET_RPC || "",
-      accounts : (process.env.DENET_PRIVATE_KEYS || "").split(','),
+      // accounts : (process.env.DENET_PRIVATE_KEYS || "").split(','),
     },
   },
   gasReporter: {

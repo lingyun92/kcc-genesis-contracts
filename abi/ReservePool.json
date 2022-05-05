@@ -44,6 +44,19 @@
   },
   {
     "inputs": [],
+    "name": "EPOCH",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_BLOCK_REWARD_AMOUNT",
     "outputs": [
       {
@@ -185,6 +198,11 @@
         "internalType": "address",
         "name": "_reservePool",
         "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_epoch",
+        "type": "uint256"
       }
     ],
     "name": "initialize",
