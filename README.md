@@ -1,25 +1,39 @@
-# kcc-genesis-contracts
 
-KuCoin Community Chain Genesis contracts based on the huobi-eco-contracts.
 
-## Contracts(PoSA related)
+Switch to the right node version:  
 
-- Validators
-- Proposal
-- Punish
-
-## Prepare
-
-Install dependency:
-
-```bash
-npm install
+```
+nvm use 
 ```
 
-Test:
+Install Dependencies: 
 
-```bash
-truffle compile
-truffle migrate
-truffle test
+```
+yarn install 
+```
+
+
+Build Contracts:  
+
+
+```
+npx hardhat compile 
+```
+
+Test: 
+
+```
+npx hardhat test
+```
+
+Generate Test Coverage Report: 
+
+```
+npx hardhat coverage 
+```
+
+Generate ABI:
+
+```
+npx hardhat abi-gen
 ```

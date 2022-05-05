@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: MIT
+
 pragma solidity >=0.6.0 <0.8.0;
 
 import "./Params.sol";
-import "./Validators.sol";
+import "./interfaces/IValidators.sol";
+import "./Admin.sol";
 
-contract Proposal is Params {
+contract Proposal is Params, Admin, IProposal {
     // How long a proposal will exist
-    uint256 public constant proposalLastingPeriod = 7 days;
+    uint256 public proposalLastingPeriod;
+
+    uint256 public proposalEffectivePeriod;
 
     // record
-    mapping(address => bool) public pass;
+    // mapping(address => bool) public pass;
+    mapping(bytes32 => bool) public pass;
 
     struct ProposalInfo {
         // who propose this proposal
@@ -37,10 +42,12 @@ contract Proposal is Params {
         bool auth;
     }
 
-    mapping(bytes32 => ProposalInfo) public proposals;
+    //  candiate address => the id of the latest proposal for the candidate 
+    mapping(address => bytes32) public latest;
+    //  proposal id => proposalInfo 
+    mapping(bytes32 => ProposalInfo) public proposals; 
     mapping(address => mapping(bytes32 => VoteInfo)) public votes;
 
-    Validators validators;
 
     event LogCreateProposal(
         bytes32 indexed id,
@@ -64,29 +71,36 @@ contract Proposal is Params {
         address indexed dst,
         uint256 time
     );
-    event LogSetUnPassed(address indexed val, uint256 time);
+    event LogSetUnpassed(address indexed val, bytes32 id, uint256 time);
 
     modifier onlyValidator() {
-        require(validators.isActiveValidator(msg.sender), "Validator only");
+        // FIXME: is candidate?
+        require(VALIDATOR_CONTRACT.isActiveValidator(msg.sender), "Validator only");
         _;
     }
 
-    function initialize(address[] calldata vals) external onlyNotInitialized {
-        validators = Validators(ValidatorContractAddr);
-
-        for (uint256 i = 0; i < vals.length; i++) {
-            require(vals[i] != address(0), "Invalid validator address");
-            pass[vals[i]] = true;
-        }
-
-        initialized = true;
+    function initialize(
+            address _admin,
+            address _validatorsContract,
+            address _punishContract,
+            address _proposalContract,
+            address _reservePool,
+            uint256 _epoch) external initializer {
+        _Admin_Init(_admin);
+        _setAddressesAndEpoch(_validatorsContract, _punishContract, _proposalContract,_reservePool,_epoch);
+        proposalLastingPeriod = 7 days;
+        proposalEffectivePeriod = 30 days;
     }
 
+    // create a new proposal
+    // @dev only admin can create a new proposal   @audit N3 
+    // @param dst The candidate in the proposal  
+    // @param details  
     function createProposal(address dst, string calldata details)
-        external
-        returns (bool)
+    external
+    onlyAdmin
+    returns (bytes32)
     {
-        require(!pass[dst], "Dst already passed, You can start staking"); 
 
         // generate proposal id
         bytes32 id = keccak256(
@@ -102,14 +116,29 @@ contract Proposal is Params {
         proposal.createTime = block.timestamp;
 
         proposals[id] = proposal;
+        latest[dst] = id;
+
         emit LogCreateProposal(id, msg.sender, dst, block.timestamp);
-        return true;
+        return id;
+    }
+
+    function isProposalPassed(address val, bytes32 id) external view override returns (bool) {
+        require(latest[val] == id, "not matched");
+        if (block.timestamp > proposals[id].createTime + proposalLastingPeriod + proposalEffectivePeriod) {
+            return false;
+        } else {
+            return pass[id];
+        }
+    }
+
+    function getLatestProposalId(address val) external view returns (bytes32) {
+        return latest[val];
     }
 
     function voteProposal(bytes32 id, bool auth)
-        external
-        onlyValidator
-        returns (bool)
+    external
+    onlyValidator
+    returns (bool)
     {
         require(proposals[id].createTime != 0, "Proposal not exist");
         require(
@@ -133,20 +162,18 @@ contract Proposal is Params {
             proposals[id].reject = proposals[id].reject + 1;
         }
 
-        if (pass[proposals[id].dst] || proposals[id].resultExist) {
+        if (pass[id] || proposals[id].resultExist) {
             // do nothing if dst already passed or rejected.
             return true;
         }
 
         if (
             proposals[id].agree >=
-            validators.getActiveValidators().length / 2 + 1
+            VALIDATOR_CONTRACT.getActiveValidators().length / 2 + 1
         ) {
-            pass[proposals[id].dst] = true;
+            pass[id] = true;
             proposals[id].resultExist = true;
 
-            // try to reactive validator if it isn't the first time
-            validators.tryReactive(proposals[id].dst);
             emit LogPassProposal(id, proposals[id].dst, block.timestamp);
 
             return true;
@@ -154,8 +181,9 @@ contract Proposal is Params {
 
         if (
             proposals[id].reject >=
-            validators.getActiveValidators().length / 2 + 1
+            VALIDATOR_CONTRACT.getActiveValidators().length / 2 + 1
         ) {
+            pass[id] = false;
             proposals[id].resultExist = true;
             emit LogRejectProposal(id, proposals[id].dst, block.timestamp);
         }
@@ -163,15 +191,15 @@ contract Proposal is Params {
         return true;
     }
 
-    function setUnPassed(address val)
-        external
-        onlyValidatorsContract
-        returns (bool)
+    function setUnpassed(address val, bytes32 id)
+    external
+    onlyValidatorsContract
+    returns (bool)
     {
         // set validator unpass
-        pass[val] = false;
+        pass[id] = false;
 
-        emit LogSetUnPassed(val, block.timestamp);
+        emit LogSetUnpassed(val, id, block.timestamp);
         return true;
     }
 }

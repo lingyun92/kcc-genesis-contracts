@@ -1,778 +1,1197 @@
 // SPDX-License-Identifier: MIT
+
 pragma solidity >=0.6.0 <0.8.0;
 
+pragma experimental ABIEncoderV2;
+
+import "@openzeppelin/contracts-ethereum-package/contracts/utils/Address.sol";
+import "@openzeppelin/contracts-ethereum-package/contracts/utils/EnumerableSet.sol";
+import "@openzeppelin/contracts-ethereum-package/contracts/math/SafeMath.sol";
+import {Math} from "@openzeppelin/contracts-ethereum-package/contracts/math/Math.sol";
+import {ReentrancyGuardUpgradeSafe} from "@openzeppelin/contracts-ethereum-package/contracts/utils/ReentrancyGuard.sol";
 import "./Params.sol";
-import "./Proposal.sol";
-import "./Punish.sol";
-import "./library/SafeMath.sol";
+import "./library/SortedList.sol";
+import "./library/SafeSend.sol";
+import "./interfaces/IReservePool.sol";
+import "./Admin.sol";
 
-contract Validators is Params {
+import "hardhat/console.sol";
+
+contract Validators is
+    Params,
+    Admin,
+    ReentrancyGuardUpgradeSafe,
+    IValidators,
+    SafeSend
+{
     using SafeMath for uint256;
+    //using SafeERC20 for IERC20;
+    using Address for address;
+    using EnumerableSet for EnumerableSet.UintSet;
+    using SortedLinkedList for SortedLinkedList.List;
+    //
+    // CONSTANT
+    //
+    // apply to calculate fee distribution.
+    uint256 public constant FEE_TOTAL_SHARES = 10000;
+    uint256 public constant MAX_FEE_SHARES = 3000;
+    uint256 public constant VOTE_UNIT = 1e18;
 
-    enum Status {
-        // validator not exist, default status
-        NotExist,
-        // validator created
-        Created,
-        // anyone has staked for the validator
-        Staked,
-        // validator's staked coins < MinimalStakingCoin
-        UnStaked,
-        // validator is jailed by system(validator have to re-propose)
-        Jailed
-    }
+    //
+    // EVENTS
+    //
+    event SetMinSelfBallots(uint256 min);
+    event SetMaxPunishmentBallots(uint256 max);
+    event SetRevokeLockingDuration(uint256 duration);
+    event SetFeeSetLockingDuration(uint256 duration);
+    event SetMarginLockingDuration(uint256 duration);
 
-    struct Description {
-        string moniker;
-        string identity;
-        string website;
-        string email;
-        string details;
-    }
-
-    struct Validator {
-        address payable feeAddr;
-        Status status;
-        uint256 coins;
-        Description description;
-        uint256 Income;
-        uint256 totalJailed;
-        uint256 lastWithdrawProfitsBlock;
-        // Address list of user who has staked for this validator
-        address[] stakers;
-    }
-
-    struct StakingInfo {
-        uint256 coins;
-        // unStakeBlock != 0 means that you are un-staking your stake,
-        // so you can't stake or unStake
-        uint256 unStakeBlock;
-        // index of the staker list in validator
-        uint256 index;
-    }
-
-    mapping(address => Validator) validatorInfo;
-    // staker => validator => info
-    mapping(address => mapping(address => StakingInfo)) staked;
-    // current validator set used by chain
-    // only changed at block epoch
-    address[] public currentValidatorSet;
-    // highest validator set(dynamic changed)
-    address[] public highestValidatorsSet;
-    // total stake of all validators
-    uint256 public totalStake;
-    // total jailed amt
-    uint256 public totalJailed;
-
-    // System contracts
-    Proposal proposal;
-    Punish punish;
-
-    enum Operations {Distribute, UpdateValidators}
-    // Record the operations is done or not.
-    mapping(uint256 => mapping(uint8 => bool)) operationsDone;
-
-    event LogCreateValidator(
-        address indexed val,
-        address indexed fee,
-        uint256 time
+    event NewValidatorAdded(
+        address indexed _validator, 
+        address indexed _manager,
+        uint256 _feeShares,
+        bool    _reused
     );
-    event LogEditValidator(
-        address indexed val,
-        address indexed fee,
-        uint256 time
+
+    event PunishValidator(
+        address indexed _validator,
+        uint256 indexed _blocknum,
+        uint256 _amount
     );
-    event LogReactive(address indexed val, uint256 time);
-    event LogAddToTopValidators(address indexed val, uint256 time);
-    event LogRemoveFromTopValidators(address indexed val, uint256 time);
-    event LogUnStake(
-        address indexed staker,
-        address indexed val,
+    event SetPoolStatus(address indexed validator, bool enabled);
+    event SetFeeShares(
+        address indexed _validator,
+        uint256 _feeShares
+    );
+    event Vote(address indexed user, address indexed validator, uint256 amount);
+    event Revoke(
+        address indexed user,
+        address indexed validator,
         uint256 amount,
-        uint256 time
+        uint256 lockingEndTime
     );
-    event LogWithdrawStaking(
-        address indexed staker,
-        address indexed val,
-        uint256 amount,
-        uint256 time
+    event Withdraw(
+        address indexed user,
+        address indexed validator,
+        uint256 amount
     );
-    event LogWithdrawProfits(
-        address indexed val,
-        address indexed fee,
-        uint256 amt,
-        uint256 time
+    event ClaimReward(
+        address indexed user,
+        address indexed validator,
+        uint256 pendingReward
     );
-    event LogRemoveValidator(address indexed val, uint256 amt, uint256 time);
-    event LogRemoveValidatorIncoming(
-        address indexed val,
-        uint256 amt,
-        uint256 time
+    event ClaimFeeReward(address indexed validator, uint256 amount);
+    event RewardTransfer(
+        address indexed from,
+        address indexed to,
+        uint256 amount
     );
-    event LogDistributeBlockReward(
-        address indexed coinbase,
-        uint256 blockReward,
-        uint256 time
+    event DepositMargin(address indexed from, address indexed validator, uint256 amount);
+    event RedeemMargin(address indexed from, address indexed validator, uint256 amount);
+    event ValidatorClaimReward(
+        address indexed validator,
+        uint256 pendingReward
     );
-    event LogUpdateValidator(address[] newSet);
-    event LogStake(
-        address indexed staker,
-        address indexed val,
-        uint256 staking,
-        uint256 time
-    );
+    event ReceiveKCS(address from, uint256 _amount);
 
-    modifier onlyNotRewarded() {
+
+    // Total Ballots
+    uint256 public totalBallot;
+
+    // The duration to wait after revoking ballots and before withdrawing.  
+    uint256 public revokeLockingDuration;
+
+    // The duration to wait after the last change of fee.
+    uint256 public feeSetLockingDuration;
+
+    // The duration to wait after revoking margins and before withdrawing. 
+    uint256 public marginLockingDuration;
+
+    uint256 public maxPunishmentAmount;
+
+    // The minimum margin in ballots that a validator needs to deposit. 
+    uint256 public minSelfBallots;
+
+    // The _sortedEnabledValidators contains all the enabled 
+    // validators that are in descending order. 
+    SortedLinkedList.List private _sortedEnabledValidators;
+
+    uint256 public rewardsLeft;
+
+    mapping(uint256 => mapping(Operation => bool)) public operationsDone;
+
+    mapping(address => PoolInfo) internal poolInfos;
+    mapping(address => Description) public candidateInfos;
+
+    mapping(bytes32 => bool) public usedProposals;
+
+    // Info of each user that votes.
+    mapping(address => mapping(address => UserInfo)) public userInfo;
+
+    // Info on each user's revoking ballots
+    mapping(address => mapping(address => RevokingInfo)) public revokingInfo;
+
+    // Mapping from the voter's address to 
+    // the validators that the voter voted.
+    mapping(address => EnumerableSet.AddressSet) private _votingRecordIndexInfo;
+
+    // Mapping from the manager's address to 
+    // the validators that the manager controls.
+    mapping(address => EnumerableSet.AddressSet) private managedValidatorInfo;
+
+    // The active validators in this epoch 
+    address[] public activeValidators;
+
+    // 
+    // @params _validators initial validators 
+    // @params _managers managers for each initial validator
+    // @params _admin the initial admin account (Gnosis Safe or Aragon Agent) 
+    // 
+    // @audit PVE004 The initialize function can only be called from the node once.
+    function initialize(
+        address[] calldata _validators,
+        address[] calldata _managers,
+        uint256[] calldata _feeShares,
+        address _admin,
+        address _validatorsContract,
+        address _punishContract,
+        address _proposalContract,
+        address _reservePool,
+        uint256 _epoch
+    ) external initializer {
         require(
-            operationsDone[block.number][uint8(Operations.Distribute)] == false,
-            "Block is already rewarded"
+            _validators.length == _feeShares.length && _validators.length == _managers.length && _validators.length > 0,
+            "invalidate validator and it's manager"
         );
-        _;
-    }
 
-    modifier onlyNotUpdated() {
-        require(
-            operationsDone[block.number][uint8(Operations.UpdateValidators)] ==
-                false,
-            "Validators already updated"
+        revokeLockingDuration = 3 days;
+        marginLockingDuration = 15 days;
+        feeSetLockingDuration = 1 days;
+        maxPunishmentAmount = 100 ether;
+        minSelfBallots =  10000 ;
+
+        require(address(this).balance >= minSelfBallots.mul(_validators.length).mul(VOTE_UNIT), "no enough kcs in validators contract");
+
+        _Admin_Init(_admin);
+        _setAddressesAndEpoch(
+            _validatorsContract,
+            _punishContract,
+            _proposalContract,
+            _reservePool,
+            _epoch
         );
-        _;
-    }
+        __ReentrancyGuard_init();
 
-    function initialize(address[] calldata vals) external onlyNotInitialized {
-        proposal = Proposal(ProposalContractAddr);
-        punish = Punish(PunishContractAddr);
 
-        for (uint256 i = 0; i < vals.length; i++) {
-            require(vals[i] != address(0), "Invalid validator address");
+        for (uint256 i = 0; i < _validators.length; ++i) {
+            address val = _validators[i];
+            uint256 feeShares = _feeShares[i];
+            // update PoolInfo
+            PoolInfo storage pool = poolInfos[val];
+            pool.manager = _managers[i];
+            pool.validator = val;
+            pool.selfBallots = minSelfBallots;
+            pool.feeShares = feeShares;
+            pool.pendingFee = 0;
+            pool.feeDebt = 0;
+            pool.lastRewardBlock = block.number;
+            // solhint-disable not-rely-on-times
+            pool.feeSettLockingEndTime = block.timestamp.add( 
+                feeSetLockingDuration
+            ); 
+            pool.suppliedBallots = minSelfBallots;
+            pool.accRewardPerShare = 0;
+            pool.voterNumber = 0;
+            pool.electedNumber = 0;
+            pool.enabled = true;
 
-            if (!isActiveValidator(vals[i])) {
-                currentValidatorSet.push(vals[i]);
+            // Update Candidate Info
+            Description storage desc = candidateInfos[val];
+            desc.details = "";
+            desc.email = "";
+            desc.website = "";
+
+            _sortedEnabledValidators.improveRanking(poolInfos, val);
+            if(activeValidators.length < MAX_VALIDATORS){
+                activeValidators.push(val);
             }
-            if (!isTopValidator(vals[i])) {
-                highestValidatorsSet.push(vals[i]);
-            }
-            if (validatorInfo[vals[i]].feeAddr == address(0)) {
-                validatorInfo[vals[i]].feeAddr = payable(vals[i]);
-            }
-            // Important: NotExist validator can't get profits
-            if (validatorInfo[vals[i]].status == Status.NotExist) {
-                validatorInfo[vals[i]].status = Status.Staked;
-            }
+            totalBallot = totalBallot.add(pool.suppliedBallots);
+
+            emit NewValidatorAdded(val,_managers[i], feeShares, false);
         }
 
-        initialized = true;
+        for (uint256 i = 0; i < _validators.length; ++i) {
+            // @audit PVE001
+            EnumerableSet.add(managedValidatorInfo[_managers[i]],_validators[i]);
+        }
     }
 
-    // stake for the validator
-    function stake(address validator)
+
+    function setMinSelfBallots(uint256 _min) external onlyAdmin {
+        require(_min != minSelfBallots, "Validators: No change detected.");
+
+        minSelfBallots = _min;
+        emit SetMinSelfBallots(_min);
+    }
+
+    function setMaxPunishmentAmount(uint256 _max) external onlyAdmin {
+        require(_max != maxPunishmentAmount, "Validators: No change detected.");
+        maxPunishmentAmount = _max;
+
+        emit SetMaxPunishmentBallots(_max);
+    }
+
+    function setRevokeLockingDuration(uint256 _lockingDuration)
         external
-        payable
-        onlyInitialized
-        returns (bool)
+        onlyAdmin
     {
-        address payable staker = msg.sender;
-        uint256 staking = msg.value;
-
         require(
-            validatorInfo[validator].status == Status.Created ||
-                validatorInfo[validator].status == Status.Staked,
-            "Can't stake to a validator in abnormal status"
-        );
-        require(
-            proposal.pass(validator),
-            "The validator you want to stake must be authorized first"
-        );
-        require(
-            staked[staker][validator].unStakeBlock == 0,
-            "Can't stake when you are unstaking"
+            _lockingDuration != revokeLockingDuration,
+            "Validators: No change detected."
         );
 
-        Validator storage valInfo = validatorInfo[validator];
-        // The staked coins of validator must >= MinimalStakingCoin
-        require(
-            valInfo.coins.add(staking) >= MinimalStakingCoin,
-            "Staking coins not enough"
-        );
-
-        // stake at first time to this valiadtor
-        if (staked[staker][validator].coins == 0) {
-            // add staker to validator's record list
-            staked[staker][validator].index = valInfo.stakers.length;
-            valInfo.stakers.push(staker);
-        }
-
-        valInfo.coins = valInfo.coins.add(staking);
-        if (valInfo.status != Status.Staked) {
-            valInfo.status = Status.Staked;
-        }
-        tryAddValidatorToHighestSet(validator, valInfo.coins);
-
-        // record staker's info
-        staked[staker][validator].coins = staked[staker][validator].coins.add(
-            staking
-        );
-        totalStake = totalStake.add(staking);
-
-        emit LogStake(staker, validator, staking, block.timestamp);
-        return true;
+        revokeLockingDuration = _lockingDuration;
+        emit SetRevokeLockingDuration(_lockingDuration);
     }
 
-    function createOrEditValidator(
-        address payable feeAddr,
-        string calldata moniker,
-        string calldata identity,
-        string calldata website,
-        string calldata email,
-        string calldata details
-    ) external onlyInitialized returns (bool) {
-        require(feeAddr != address(0), "Invalid fee address");
+    function setFeeSetLockingDuration(uint256 _lockingDuration)
+        external
+        onlyAdmin
+    {
         require(
-            validateDescription(moniker, identity, website, email, details),
-            "Invalid description"
-        );
-        address payable validator = msg.sender;
-        bool isCreate = false;
-        if (validatorInfo[validator].status == Status.NotExist) {
-            require(proposal.pass(validator), "You must be authorized first");
-            validatorInfo[validator].status = Status.Created;
-            isCreate = true;
-        }
-
-        if (validatorInfo[validator].feeAddr != feeAddr) {
-            validatorInfo[validator].feeAddr = feeAddr;
-        }
-
-        validatorInfo[validator].description = Description(
-            moniker,
-            identity,
-            website,
-            email,
-            details
+            _lockingDuration != feeSetLockingDuration,
+            "Validators: No change detected."
         );
 
-        if (isCreate) {
-            emit LogCreateValidator(validator, feeAddr, block.timestamp);
+        feeSetLockingDuration = _lockingDuration;
+        emit SetFeeSetLockingDuration(_lockingDuration);
+    }
+
+    function setMarginLockingDuration(uint256 _lockingDuration)
+        external
+        onlyAdmin
+    {
+        require(
+            _lockingDuration != marginLockingDuration,
+            "Validators: No change detected."
+        );
+
+        marginLockingDuration = _lockingDuration;
+
+        emit SetMarginLockingDuration(_lockingDuration);
+    }
+
+    function getValidatorsOfManager(address _manager) external view returns(address[] memory) {
+        EnumerableSet.AddressSet storage validators = managedValidatorInfo[_manager];
+
+        uint256 validatorsLength = EnumerableSet.length(validators);
+        address[] memory validatorList = new address[](validatorsLength);
+
+        uint256 index = 0;
+        for (uint256 i = 0; i < validatorsLength; i++) {
+            address val = address(EnumerableSet.at(validators, i));
+            validatorList[index] = val;
+            index = index.add(1);
+        }
+        return validatorList;
+    }
+
+    //
+    // Add/Reuse a validator based on some proposal. 
+    //
+    // Only the admin or the validator in the proposal can call this function. 
+    function addValidator(
+        address _validator,
+        address _manager,
+        bytes32 _proposalID,
+        uint256 _feeShares,
+        string memory description,
+        string memory website,
+        string memory email
+    ) public payable nonReentrant {
+
+        require( msg.value.mod(VOTE_UNIT) == 0, "msg.value must be an integer multiple of an ether.");
+
+        require(!usedProposals[_proposalID],"proposal cannot be reused");
+        usedProposals[_proposalID] = true; 
+
+        require(
+            PROPOSAL_CONTRACT.isProposalPassed(_validator, _proposalID),
+            "proposal is not passed"
+        );
+
+        require(
+            msg.sender == admin || msg.sender == _validator,
+            "only validator in the proposal or admin can call addValidator"
+        );
+
+        require(_validator != address(0), "Validators: ZERO_ADDRESS.");
+        require(
+            _feeShares <= MAX_FEE_SHARES,
+            "Validators: the fee shares should be in the range(0..3000)."
+        );
+        require(
+            poolInfos[_validator].enabled  == false,
+            "already have an enabled pool"
+        );
+
+        // how many votes does the validator's margin contribute 
+        // to the pool 
+        uint256 votes = msg.value.div(VOTE_UNIT);
+
+        if (poolInfos[_validator].validator == _validator) {
+            // reuse a previous pool 
+            PoolInfo storage pool = poolInfos[_validator];
+
+            if (pool.selfBallots >= minSelfBallots) {
+                // @audit PVE003 
+                // notice: if _manager != pool.manager, 
+                //         rewards will be sent to the previous manager of the validator 
+                _validatorClaimReward(_validator);
+            }
+
+            // @audit PVE001
+            EnumerableSet.add(managedValidatorInfo[_manager],_validator);
+
+            pool.selfBallots = pool.selfBallots.add(votes);
+            pool.selfBallotsRewardsDebt = pool.accRewardPerShare.mul(pool.selfBallots).div(1e12);
+            pool.suppliedBallots = pool.suppliedBallots.add(votes);
+            pool.enabled = true;
+            pool.manager = _manager;
+            candidateInfos[_validator].website = website; 
+            candidateInfos[_validator].email = email; 
+            candidateInfos[_validator].details = description; 
+
+            emit NewValidatorAdded(_validator, _manager, _feeShares, true);
+
         } else {
-            emit LogEditValidator(validator, feeAddr, block.timestamp);
+            
+            poolInfos[_validator] = PoolInfo({
+                validator: _validator,
+                manager: _manager,
+                selfBallots: votes,
+                selfBallotsRewardsDebt: 0,
+                feeShares: _feeShares,
+                lastRewardBlock: block.number,
+                feeSettLockingEndTime: block.timestamp.add(
+                    feeSetLockingDuration
+                ), // solhint-disable not-rely-on-time
+                pendingFee: 0,
+                feeDebt: 0,
+                suppliedBallots: votes,
+                accRewardPerShare: 0,
+                voterNumber: 0,
+                electedNumber: 0,
+                enabled: true 
+            });
+            candidateInfos[_validator] = Description({
+                website: website,
+                email: email,
+                details: description
+            });
+
+            emit NewValidatorAdded(_validator, _manager, _feeShares, false);
         }
-        return true;
+
+        if (poolInfos[_validator].selfBallots >= minSelfBallots) {
+            _sortedEnabledValidators.improveRanking(poolInfos, _validator);
+        }
+
+        totalBallot = totalBallot.add(votes);
+
     }
 
-    function tryReactive(address validator)
-        external
-        onlyProposalContract
-        onlyInitialized
-        returns (bool)
-    {
-        // Only update validator status if UnStaked/Jailed
-        if (
-            validatorInfo[validator].status != Status.UnStaked &&
-            validatorInfo[validator].status != Status.Jailed
-        ) {
-            return true;
-        }
-
-        if (validatorInfo[validator].status == Status.Jailed) {
-            require(punish.cleanPunishRecord(validator), "clean failed");
-        }
-        validatorInfo[validator].status = Status.Created;
-
-        emit LogReactive(validator, block.timestamp);
-
-        return true;
+    // Enable/disable the target pool 
+    // Only admin can call this function. 
+    function setPoolStatus(address _val, bool _enabled) public onlyAdmin {
+        _setPoolStatus(_val, _enabled);
     }
 
-    function unStake(address validator)
-        external
-        onlyInitialized
-        returns (bool)
-    {
-        address staker = msg.sender;
+    // Update the given validator's commission rate.
+    // Only the manager of the pool can call this function. 
+    function setFeeSharesOfValidator(uint256 _shares, address _val) public {
+        // @audit PVE001-2 : only the manager of the validator can change the fee shares 
+        PoolInfo storage pool = poolInfos[_val];
+        require(msg.sender == pool.manager, "only manager can change it");
+        require(!pool.enabled, "pool does not enabled");
+        require(pool.validator != address(0), "Pool does not exist");
         require(
-            validatorInfo[validator].status != Status.NotExist,
-            "Validator not exist"
+            _shares <= MAX_FEE_SHARES,
+            "Validators: the fee shares should be in the range(0..3000)."
         );
-
-        StakingInfo storage stakingInfo = staked[staker][validator];
-        Validator storage valInfo = validatorInfo[validator];
-        uint256 unStakeAmount = stakingInfo.coins;
-
         require(
-            stakingInfo.unStakeBlock == 0,
-            "You are already in unstaking status"
-        );
-        require(unStakeAmount > 0, "You don't have any stake");
-        // You can't unstake if the validator is the only one top validator and
-        // this unstake operation will cause staked coins of validator < MinimalStakingCoin
-        require(
-            !(highestValidatorsSet.length == 1 &&
-                isTopValidator(validator) &&
-                valInfo.coins.sub(unStakeAmount) < MinimalStakingCoin),
-            "You can't unstake, validator list will be empty after this operation!"
-        );
+            block.timestamp >= pool.feeSettLockingEndTime,
+            "Validators: one time of change within 24 hours."
+        ); // solhint-disable not-rely-on-time
 
-        // try to remove this staker out of validator stakers list.
-        if (stakingInfo.index != valInfo.stakers.length - 1) {
-            valInfo.stakers[stakingInfo.index] = valInfo.stakers[valInfo
-                .stakers
-                .length - 1];
-            // update index of the changed staker.
-            staked[valInfo.stakers[stakingInfo.index]][validator]
-                .index = stakingInfo.index;
-        }
-        valInfo.stakers.pop();
+        require(_shares != pool.feeShares, "Validators: no change detected.");
 
-        valInfo.coins = valInfo.coins.sub(unStakeAmount);
-        stakingInfo.unStakeBlock = block.number;
-        stakingInfo.index = 0;
-        totalStake = totalStake.sub(unStakeAmount);
+        // total 10000(1e4) shares, how many shares validator itself occupies.
+        pool.feeShares = _shares;
+        // 
+        pool.feeSettLockingEndTime = block.timestamp.add(feeSetLockingDuration); // solhint-disable not-rely-on-time
 
-        // try to remove it out of active validator set if validator's coins < MinimalStakingCoin
-        if (valInfo.coins < MinimalStakingCoin) {
-            valInfo.status = Status.UnStaked;
-            // it's ok if validator not in highest set
-            tryRemoveValidatorInHighestSet(validator);
+        emit SetFeeShares(_val, _shares);
 
-            // call proposal contract to set unpass.
-            // validator have to repropose to rebecome a validator.
-            proposal.setUnPassed(validator);
-        }
-
-        emit LogUnStake(staker, validator, unStakeAmount, block.timestamp);
-        return true;
     }
 
-    function withdrawStaking(address validator) external returns (bool) {
-        address payable staker = payable(msg.sender);
-        StakingInfo storage stakingInfo = staked[staker][validator];
-        require(
-            validatorInfo[validator].status != Status.NotExist,
-            "validator not exist"
-        );
-        require(stakingInfo.unStakeBlock != 0, "You have to unstake first");
-        // Ensure staker can withdraw his staking back
-        require(
-            stakingInfo.unStakeBlock + StakingLockPeriod <= block.number,
-            "Your staking haven't unlocked yet"
-        );
-        require(stakingInfo.coins > 0, "You don't have any stake");
-
-        uint256 staking = stakingInfo.coins;
-        stakingInfo.coins = 0;
-        stakingInfo.unStakeBlock = 0;
-
-        // send stake back to staker
-        staker.transfer(staking);
-
-        emit LogWithdrawStaking(staker, validator, staking, block.timestamp);
-        return true;
-    }
-
-    // feeAddr can withdraw profits of it's validator
-    function withdrawProfits(address validator) external returns (bool) {
-        address payable feeAddr = payable(msg.sender);
-        require(
-            validatorInfo[validator].status != Status.NotExist,
-            "Validator not exist"
-        );
-        require(
-            validatorInfo[validator].feeAddr == feeAddr,
-            "You are not the fee receiver of this validator"
-        );
-        require(
-            validatorInfo[validator].lastWithdrawProfitsBlock +
-                WithdrawProfitPeriod <=
-                block.number,
-            "You must wait enough blocks to withdraw your profits after latest withdraw of this validator"
-        );
-        uint256 Income = validatorInfo[validator].Income;
-        require(Income > 0, "You don't have any profits");
-
-        // update info
-        validatorInfo[validator].Income = 0;
-        validatorInfo[validator].lastWithdrawProfitsBlock = block.number;
-
-        // send profits to fee address
-        if (Income > 0) {
-            feeAddr.transfer(Income);
-        }
-
-        emit LogWithdrawProfits(
-            validator,
-            feeAddr,
-            Income,
-            block.timestamp
-        );
-
-        return true;
-    }
-
-    // distributeBlockReward distributes block reward to all active validators
+    // Only the miner can call this function to distribute rewards to validators.
     function distributeBlockReward()
         external
         payable
+        override
         onlyMiner
-        onlyNotRewarded
-        onlyInitialized
+        nonReentrant
     {
-        operationsDone[block.number][uint8(Operations.Distribute)] = true;
-        address val = msg.sender;
-        uint256 amt = msg.value;
 
-        // never reach this
-        if (validatorInfo[val].status == Status.NotExist) {
+        require(!operationsDone[block.number][Operation.Distributed],"cannot be called more than once in a single block");
+
+        operationsDone[block.number][Operation.Distributed] = true;
+
+        uint256 rewardsFromReservePool = RESERVEPOOL_CONTRACT.withdrawBlockReward();
+        if (rewardsFromReservePool == 0) {
             return;
         }
 
-        // Jailed validator can't get profits.
-        addProfitsToActiveValidatorsByStakePercentExcept(amt, address(0));
+        uint256 numOfValidatorRewarded = 0;
+        // total amount available for distribution:
+        //   rewardLeft + rewardsFromReservePool
+        uint256 totalAvailable = rewardsLeft.add(rewardsFromReservePool);
+        uint256 totalDistributed = 0; // actually distributed 
 
-        emit LogDistributeBlockReward(val, amt, block.timestamp);
+        if (activeValidators.length > 0) {
+            // The total ballots of all active validators 
+            uint256 _totalBallot = 0;
+            for (uint8 i = 0; i < activeValidators.length; i++) {
+                PoolInfo storage pool = poolInfos[activeValidators[i]];
+                if(pool.selfBallots >= minSelfBallots){ // only taking validator with enough margin into accounts
+                    _totalBallot = _totalBallot.add(poolInfos[activeValidators[i]].suppliedBallots);
+                }
+            }
+
+            if (_totalBallot > 0) {
+                // roundoff error - 
+                uint256 rewardsPerShare = totalAvailable.div(_totalBallot);
+
+                for (uint8 i = 0; i < activeValidators.length; i++) {
+                    PoolInfo storage pool = poolInfos[activeValidators[i]];
+
+                    if(pool.selfBallots < minSelfBallots){
+                        continue;
+                    }
+
+                    uint256 poolRewards = rewardsPerShare.mul(pool.suppliedBallots);
+
+                    // roundoff error -
+                    // validator's commission fee 
+                    uint256 feeReward = poolRewards.mul(pool.feeShares).div(
+                        FEE_TOTAL_SHARES
+                    );
+
+                    pool.pendingFee = pool.pendingFee.add(feeReward);
+
+                    // reward to be distributed to staked users
+                    uint256 votingReward = poolRewards.sub(feeReward);
+ 
+                    {
+                        pool.accRewardPerShare = pool.accRewardPerShare.add(
+                            votingReward.mul(1e12).div(pool.suppliedBallots) // roundoff error -
+                        );
+
+                    }
+
+                    // roundoff error -
+                    totalDistributed = totalDistributed.add(poolRewards); 
+                    pool.lastRewardBlock = block.number;
+                    pool.electedNumber = pool.electedNumber.add(1);   
+                    numOfValidatorRewarded++;                 
+                }
+            }
+
+
+        }
+
+        require(
+            totalAvailable >= totalDistributed,
+            "Validators: totalAvailable is less than totalDistributed"
+        );
+
+
+        //
+        rewardsLeft = totalAvailable.sub(totalDistributed);
+
     }
 
-    function updateActiveValidatorSet(uint256 epoch)
-        public
+    function updateActiveValidatorSet(address[] calldata newSet)
+        external
+        override
         onlyMiner
-        onlyNotUpdated
-        onlyInitialized
-        onlyBlockEpoch(epoch)
+        onlyBlockEpoch
     {
-        require(highestValidatorsSet.length > 0, "Validator set empty!");
+        operationsDone[block.number][Operation.UpdatedValidators] = true;
 
-        operationsDone[block.number][uint8(Operations.UpdateValidators)] = true;
+        require(newSet.length > 0 && newSet.length <= MAX_VALIDATORS, "invalid length of newSet array");
 
-        currentValidatorSet = highestValidatorsSet;
-
-        emit LogUpdateValidator(currentValidatorSet);
+        activeValidators = newSet; // FIXME: gas cost ?
     }
 
-    function removeValidator(address val) external onlyPunishContract {
-        uint256 amt = validatorInfo[val].Income;
+    function getTopValidators()
+        external
+        view
+        override
+        returns (address[] memory)
+    {
 
-        tryRemoveValidatorIncoming(val);
+        uint256 nValidators = Math.min(
+            MAX_VALIDATORS,
+            _sortedEnabledValidators.length
+        );
 
-        // remove the validator out of active set
-        // Note: the jailed validator may in active set if there is only one validator exists
-        if (highestValidatorsSet.length > 1) {
-            tryJailValidator(val);
-
-            // call proposal contract to set unpass.
-            // you have to repropose to be a validator.
-            proposal.setUnPassed(val);
-            emit LogRemoveValidator(val, amt, block.timestamp);
+        if (nValidators == 0) {
+            return new address[](0);
         }
+
+        address[] memory topValidators = new address[](nValidators);
+
+        // The first element
+        address currVal = _sortedEnabledValidators.head;
+        topValidators[0] = currVal;
+
+        // All other elements
+        uint256 nextIndex = 1;
+        while (nextIndex < nValidators) {
+            currVal = _sortedEnabledValidators.next[currVal];
+            topValidators[nextIndex] = currVal;
+            nextIndex++;
+        }
+
+        return topValidators;
     }
 
-    function removeValidatorIncoming(address val) external onlyPunishContract {
-        tryRemoveValidatorIncoming(val);
-    }
-
-    function getValidatorDescription(address val)
-        public
-        view
-        returns (
-            string memory,
-            string memory,
-            string memory,
-            string memory,
-            string memory
-        )
+    // punish validator
+    //  @params validator the address of the validator
+    //  @params remove whether remove the validator from the set of active validators
+    function punish(address validator, bool remove)
+        external
+        override
+        onlyPunishContract
     {
-        Validator memory v = validatorInfo[val];
+        // 
+        if (remove) {
+            _setPoolStatus(validator, false);
+        }
 
-        return (
-            v.description.moniker,
-            v.description.identity,
-            v.description.website,
-            v.description.email,
-            v.description.details
-        );
-    }
+        uint256 punishAmount = maxPunishmentAmount;
+        PoolInfo storage pool = poolInfos[validator];
+        uint256 selfBallotsReward = pool.accRewardPerShare.mul(pool.selfBallots).div(1e12).sub(pool.selfBallotsRewardsDebt);
 
-    function getValidatorInfo(address val)
-        public
-        view
-        returns (
-            address payable,
-            Status,
-            uint256,
-            uint256,
-            uint256,
-            uint256,
-            address[] memory
-        )
-    {
-        Validator memory v = validatorInfo[val];
+        uint256 amount = 0;
+        if (pool.pendingFee >= punishAmount) {
+            // from pendingFee 
+            pool.pendingFee = pool.pendingFee.sub(punishAmount);
+            pool.feeDebt = pool.feeDebt.add(punishAmount);
+            amount = punishAmount;
+        } else {
+            // from pendingFee + selfBallotsReward 
+            uint256 sub = punishAmount.sub(pool.pendingFee);
+            amount = amount.add(pool.pendingFee);
+            pool.feeDebt = pool.feeDebt.add(pool.pendingFee);
+            pool.pendingFee = 0;
 
-        return (
-            v.feeAddr,
-            v.status,
-            v.coins,
-            v.Income,
-            v.totalJailed,
-            v.lastWithdrawProfitsBlock,
-            v.stakers
-        );
-    }
-
-    function getStakingInfo(address staker, address val)
-        public
-        view
-        returns (
-            uint256,
-            uint256,
-            uint256
-        )
-    {
-        return (
-            staked[staker][val].coins,
-            staked[staker][val].unStakeBlock,
-            staked[staker][val].index
-        );
-    }
-
-    function getActiveValidators() public view returns (address[] memory) {
-        return currentValidatorSet;
-    }
-
-    function getTotalStakeOfActiveValidators()
-        public
-        view
-        returns (uint256 total, uint256 len)
-    {
-        return getTotalStakeOfActiveValidatorsExcept(address(0));
-    }
-
-    function getTotalStakeOfActiveValidatorsExcept(address val)
-        private
-        view
-        returns (uint256 total, uint256 len)
-    {
-        for (uint256 i = 0; i < currentValidatorSet.length; i++) {
-            if (
-                validatorInfo[currentValidatorSet[i]].status != Status.Jailed &&
-                val != currentValidatorSet[i]
-            ) {
-                total = total.add(validatorInfo[currentValidatorSet[i]].coins);
-                len++;
+            if (selfBallotsReward >= sub) {
+                pool.selfBallotsRewardsDebt = pool.selfBallotsRewardsDebt.add(sub);
+                amount = amount.add(sub);
+            } else {
+                pool.selfBallotsRewardsDebt = pool.selfBallotsRewardsDebt.add(selfBallotsReward);
+                amount = amount.add(selfBallotsReward);
             }
         }
 
-        return (total, len);
+        _sendValue(payable(address(RESERVEPOOL_CONTRACT)), amount);
+
+        emit PunishValidator(validator, block.number, amount);
     }
 
-    function isActiveValidator(address who) public view returns (bool) {
-        for (uint256 i = 0; i < currentValidatorSet.length; i++) {
-            if (currentValidatorSet[i] == who) {
-                return true;
-            }
+    // Deposit ballot - KCS to the target validator for Reward allocation.
+    function vote(address _val) public payable nonReentrant {
+        PoolInfo storage pool = poolInfos[_val];
+        require(pool.selfBallots >= minSelfBallots, "Validators: must require minSelfBallots");
+
+        require(msg.sender != _val, "validator can only vote to himself by depositing margin.");
+
+        uint256 ballotAmount = msg.value.div(VOTE_UNIT);
+
+        // 
+        require(
+            msg.value > 0 && ballotAmount > 0,
+            "Validators: votes must be integer multiple of 1 KCS."
+        );
+
+        uint256 ballotValue = ballotAmount.mul(VOTE_UNIT);
+        uint256 diff = msg.value.sub(ballotValue);
+
+        _vote(msg.sender, _val, ballotAmount, pool);
+
+        // @audit N1 Remove unsued accessControl 
+        if (diff > 0) {
+            _safeTransfer(diff, msg.sender);
         }
-
-        return false;
     }
 
-    function isTopValidator(address who) public view returns (bool) {
-        for (uint256 i = 0; i < highestValidatorsSet.length; i++) {
-            if (highestValidatorsSet[i] == who) {
-                return true;
-            }
+    // Withdraw vote tokens from target pool.
+    function revokeVote(address _val, uint256 _amount) external nonReentrant {
+        require(msg.sender!= _val, "validator can only vote to himself by depositing margin.");
+        _revokeVote(msg.sender, _val, _amount);
+    }
+
+    function withdraw(address _val) external nonReentrant {
+        require(msg.sender!= _val, "validator can only vote to himself by depositing margin.");
+        require(
+            isWithdrawable(msg.sender, _val),
+            "Validators: no ballots to withdraw or ballots are still locking."
+        );
+
+        _withdraw(msg.sender, _val);
+    }
+
+    // claim reward tokens from target pool.
+    function claimReward(address _val) external nonReentrant {
+        return _claimReward(_val);
+    }
+
+    // Claim commission fee of a validator 
+    // @param _val the address of the validator 
+    function claimFeeReward(address _val) external nonReentrant {
+        PoolInfo storage pool = poolInfos[_val];
+
+        require(pool.validator == _val, "no such pool");
+
+        require(
+            pool.manager == msg.sender,
+            "Validators: only manager of the pool can claim fee rewards"
+        );
+
+        require(pool.pendingFee > 0, "Validators: no pending fee reward to claim.");
+
+        uint256 feeReward = pool.pendingFee;
+        pool.pendingFee = 0; // reset to 0
+        pool.feeDebt = pool.feeDebt.add(feeReward);
+
+        //
+        _safeTransfer(feeReward,msg.sender);
+
+        // 
+        emit ClaimFeeReward(pool.validator, feeReward);
+    }
+
+
+    // 
+    function isPool(address _validator) external view returns (bool) {
+        return (poolInfos[_validator].validator != address(0));
+    }
+
+
+    // A user's pending rewards in a pool of a validator.
+    function pendingReward(address _val, address _user)
+        external
+        view
+        returns (uint256)
+    {
+        return _calculatePendingReward(_val, _user);
+    }
+
+    // The voting summary of a user
+    function getUserVotingSummary(address _user)
+        external
+        view
+        returns (VotingData[] memory votingDataList)
+    {
+        EnumerableSet.AddressSet storage recordIndexes = _votingRecordIndexInfo[
+            _user
+        ];
+
+        uint256 recordIndexesLength = EnumerableSet.length(recordIndexes);
+        votingDataList = new VotingData[](recordIndexesLength);
+
+        uint256 index = 0;
+        for (uint256 i = 0; i < recordIndexesLength; i++) {
+            address val = address(EnumerableSet.at(recordIndexes, i));
+
+            PoolInfo memory pool = poolInfos[val];
+            UserInfo memory user = userInfo[val][_user];
+            RevokingInfo memory revokingInfoItem = revokingInfo[_user][val];
+
+            uint256 pending = _calculatePendingReward(val, _user);
+            votingDataList[index] = VotingData({
+                validator: pool.validator,
+                validatorBallot: pool.suppliedBallots,
+                feeShares: pool.feeShares,
+                ballot: user.amount,
+                pendingReward: pending,
+                revokingBallot: revokingInfoItem.amount,
+                revokeLockingEndTime: revokingInfoItem.lockingEndTime
+            });
+            index = index.add(1);
         }
-
-        return false;
     }
 
-    function getTopValidators() public view returns (address[] memory) {
-        return highestValidatorsSet;
+
+    // 
+    function isWithdrawable(address _user, address _val)
+        public
+        view
+        returns (bool)
+    {
+        RevokingInfo memory revokingInfoItem = revokingInfo[_user][_val];
+        return (revokingInfoItem.amount > 0 &&
+            block.timestamp >= revokingInfoItem.lockingEndTime); // solhint-disable not-rely-on-time
     }
 
-    function validateDescription(
-        string memory moniker,
-        string memory identity,
-        string memory website,
-        string memory email,
-        string memory details
-    ) public pure returns (bool) {
-        require(bytes(moniker).length <= 70, "Invalid moniker length");
-        require(bytes(identity).length <= 3000, "Invalid identity length");
-        require(bytes(website).length <= 140, "Invalid website length");
-        require(bytes(email).length <= 140, "Invalid email length");
-        require(bytes(details).length <= 280, "Invalid details length");
-
-        return true;
-    }
-
-    function tryAddValidatorToHighestSet(address val, uint256 staking)
+    function _calculatePendingReward(address _val, address _user)
         internal
+        view
+        returns (uint256)
     {
-        // do nothing if you are already in highestValidatorsSet set
-        for (uint256 i = 0; i < highestValidatorsSet.length; i++) {
-            if (highestValidatorsSet[i] == val) {
-                return;
-            }
-        }
+        PoolInfo memory pool = poolInfos[_val];
+        UserInfo memory user = userInfo[_val][_user];
 
-        if (highestValidatorsSet.length < MaxValidators) {
-            highestValidatorsSet.push(val);
-            emit LogAddToTopValidators(val, block.timestamp);
-            return;
-        }
-
-        // find lowest validator index in current validator set
-        uint256 lowest = validatorInfo[highestValidatorsSet[0]].coins;
-        uint256 lowestIndex = 0;
-        for (uint256 i = 1; i < highestValidatorsSet.length; i++) {
-            if (validatorInfo[highestValidatorsSet[i]].coins < lowest) {
-                lowest = validatorInfo[highestValidatorsSet[i]].coins;
-                lowestIndex = i;
-            }
-        }
-
-        // do nothing if staking amount isn't bigger than current lowest
-        if (staking <= lowest) {
-            return;
-        }
-
-        // replace the lowest validator
-        emit LogAddToTopValidators(val, block.timestamp);
-        emit LogRemoveFromTopValidators(
-            highestValidatorsSet[lowestIndex],
-            block.timestamp
-        );
-        highestValidatorsSet[lowestIndex] = val;
-    }
-
-    function tryRemoveValidatorIncoming(address val) private {
-        // do nothing if validator not exist(impossible)
-        if (
-            validatorInfo[val].status == Status.NotExist ||
-            currentValidatorSet.length <= 1
-        ) {
-            return;
-        }
-
-        uint256 amt = validatorInfo[val].Income;
-        if (amt > 0) {
-            addProfitsToActiveValidatorsByStakePercentExcept(amt, val);
-            // for display purpose
-            totalJailed = totalJailed.add(amt);
-            validatorInfo[val].totalJailed = validatorInfo[val]
-                .totalJailed
-                .add(amt);
-
-            validatorInfo[val].Income = 0;
-        }
-
-        emit LogRemoveValidatorIncoming(val, amt, block.timestamp);
-    }
-
-    // add profits to all validators by stake percent except the punished validator or jailed validator
-    function addProfitsToActiveValidatorsByStakePercentExcept(
-        uint256 totalReward,
-        address punishedVal
-    ) private {
-        if (totalReward == 0) {
-            return;
-        }
-
-        uint256 totalRewardStake;
-        uint256 rewardValsLen;
-        (
-            totalRewardStake,
-            rewardValsLen
-        ) = getTotalStakeOfActiveValidatorsExcept(punishedVal);
-
-        if (rewardValsLen == 0) {
-            return;
-        }
-
-        uint256 remain;
-        address last;
-
-        // no stake(at genesis period)
-        if (totalRewardStake == 0) {
-            uint256 per = totalReward.div(rewardValsLen);
-            remain = totalReward.sub(per.mul(rewardValsLen));
-
-            for (uint256 i = 0; i < currentValidatorSet.length; i++) {
-                address val = currentValidatorSet[i];
-                if (
-                    validatorInfo[val].status != Status.Jailed &&
-                    val != punishedVal
-                ) {
-                    validatorInfo[val].Income = validatorInfo[val]
-                        .Income
-                        .add(per);
-
-                    last = val;
-                }
-            }
-
-            if (remain > 0 && last != address(0)) {
-                validatorInfo[last].Income = validatorInfo[last]
-                    .Income
-                    .add(remain);
-            }
-            return;
-        }
-
-        uint256 added;
-        for (uint256 i = 0; i < currentValidatorSet.length; i++) {
-            address val = currentValidatorSet[i];
-            if (
-                validatorInfo[val].status != Status.Jailed && val != punishedVal
-            ) {
-                uint256 reward = totalReward.mul(validatorInfo[val].coins).div(
-                    totalRewardStake
-                );
-                added = added.add(reward);
-                last = val;
-                validatorInfo[val].Income = validatorInfo[val]
-                    .Income
-                    .add(reward);
-            }
-        }
-
-        remain = totalReward.sub(added);
-        if (remain > 0 && last != address(0)) {
-            validatorInfo[last].Income = validatorInfo[last].Income.add(
-                remain
+        return
+            user.amount.mul(pool.accRewardPerShare).div(1e12).sub(
+                user.rewardDebt
             );
+    }
+
+     
+    function _vote(
+        address _user,
+        address _val,
+        uint256 _amount,
+        PoolInfo storage pool
+    ) internal {
+
+        UserInfo storage user = userInfo[_val][_user];
+
+         
+        if (user.amount > 0) {
+             
+            uint256 pending = _calculatePendingReward(_val, _user);
+            if (pending > 0) {
+                _safeTransfer(pending,msg.sender);
+                emit ClaimReward(_user, _val, pending);
+            }
+        } else {
+             
+             
+            pool.voterNumber = pool.voterNumber.add(1);
+
+            EnumerableSet.AddressSet
+                storage recordIndexes = _votingRecordIndexInfo[_user];
+            EnumerableSet.add(recordIndexes, _val);
+        }
+        
+        user.amount = user.amount.add(_amount);
+        
+        user.rewardDebt = user.amount.mul(pool.accRewardPerShare).div(1e12);
+        
+        pool.suppliedBallots = pool.suppliedBallots.add(_amount);
+         
+        totalBallot = totalBallot.add(_amount);
+
+        if(pool.selfBallots >= minSelfBallots && pool.enabled){
+            _sortedEnabledValidators.improveRanking(poolInfos, pool.validator);
+        }
+        // emit event
+        emit Vote(_user, _val, _amount);
+    }
+
+    function _withdraw(address _user, address _val) internal {
+        RevokingInfo storage revokingInfoItem = revokingInfo[_user][_val];
+        UserInfo memory user = userInfo[_val][_user];
+
+        uint256 amount = revokingInfoItem.amount;
+
+        
+        revokingInfoItem.amount = 0;
+        
+
+        _safeTransfer(amount.mul(VOTE_UNIT),msg.sender);
+
+        
+        if (user.amount == 0) {
+            EnumerableSet.AddressSet
+                storage recordIndexes = _votingRecordIndexInfo[_user];
+            
+            EnumerableSet.remove(recordIndexes, _val);
+        }
+        emit Withdraw(_user, _val, amount);
+    }
+
+
+    // @param _amount is the number of ballots 
+    function _revokeVote(
+        address _user,
+        address _val,
+        uint256 _amount
+    ) internal {
+        require(
+            _amount > 0 ,"the revoking amount must be greater than zero"
+        );
+
+        PoolInfo storage pool = poolInfos[_val];
+        UserInfo storage user = userInfo[_val][_user];
+
+        uint256 availableAmount = user.amount;
+        require(
+            availableAmount >= _amount,
+            "Validators: no enough ballots to revoke."
+        );
+
+        
+        uint256 pending = _calculatePendingReward(_val, _user);
+
+        if (pending > 0) {
+            _safeTransfer(pending,msg.sender);
+            emit ClaimReward(_user, _val, pending);
+        }
+
+        
+        if (isWithdrawable(_user, _val)) {
+            _withdraw(_user, _val);
+        }
+        
+        pool.suppliedBallots = pool.suppliedBallots.sub(_amount);
+        
+        user.amount = availableAmount.sub(_amount);
+        
+        user.rewardDebt = user.amount.mul(pool.accRewardPerShare).div(1e12);
+        
+        totalBallot = totalBallot.sub(_amount);
+
+        if (user.amount == 0) {
+            
+            
+            pool.voterNumber = pool.voterNumber.sub(1);
+        }
+
+        _updateRevokingInfo(_user, _val, _amount,revokeLockingDuration);
+        
+        _sortedEnabledValidators.lowerRanking(poolInfos, _val);
+    }
+
+    function _safeTransfer(uint256 _amount, address to) internal {
+        uint256 totalSpendableReward = address(this).balance;
+        if (_amount > totalSpendableReward) {
+            _sendValue(payable(to),totalSpendableReward);
+            emit RewardTransfer(
+                address(this),
+                to,
+                totalSpendableReward
+            );
+        } else {
+            
+            _sendValue(payable(to),_amount);
+            emit RewardTransfer(address(this), to, _amount);
         }
     }
 
-    function tryJailValidator(address val) private {
-        // do nothing if validator not exist
-        if (validatorInfo[val].status == Status.NotExist) {
-            return;
-        }
-
-        // set validator status to jailed
-        validatorInfo[val].status = Status.Jailed;
-
-        // try to remove if it's in active validator set
-        tryRemoveValidatorInHighestSet(val);
+    receive() external payable {
+        emit ReceiveKCS(msg.sender, msg.value);
     }
 
-    function tryRemoveValidatorInHighestSet(address val) private {
-        for (
-            uint256 i = 0;
-            // ensure at least one validator exist
-            i < highestValidatorsSet.length && highestValidatorsSet.length > 1;
-            i++
-        ) {
-            if (val == highestValidatorsSet[i]) {
-                // remove it
-                if (i != highestValidatorsSet.length - 1) {
-                    highestValidatorsSet[i] = highestValidatorsSet[highestValidatorsSet
-                        .length - 1];
-                }
-
-                highestValidatorsSet.pop();
-                emit LogRemoveFromTopValidators(val, block.timestamp);
-
-                break;
+    function isActiveValidator(address val)
+        external
+        view
+        override
+        returns (bool)
+    {
+        for (uint256 i = 0; i < activeValidators.length; ++i) {
+            if (activeValidators[i] == val) {
+                return true;
             }
         }
+        return false;
+    }
+
+    function getActiveValidators()
+        external
+        view
+        override
+        returns (address[] memory)
+    {
+        return activeValidators;
+    }
+
+    // @param _val is validator address
+    function depositMargin(address _val) external payable nonReentrant {
+
+        require(
+            msg.value > 0 && msg.value.mod(VOTE_UNIT) == 0,
+            "Validators: votes must be integer multiple of 1 KCS."
+        );
+        uint256 ballots = msg.value.div(VOTE_UNIT);
+
+        require(msg.sender == poolInfos[_val].manager, "pool does not exist or msg.sender is not the manager of the pool");
+        PoolInfo storage pool = poolInfos[_val];
+
+        if (pool.selfBallots > 0) {
+            _validatorClaimReward(_val);
+        }
+
+        pool.selfBallots = pool.selfBallots.add(ballots);
+        pool.selfBallotsRewardsDebt = pool.accRewardPerShare.mul(pool.selfBallots).div(1e12);
+        pool.suppliedBallots = pool.suppliedBallots.add(ballots);
+        totalBallot = totalBallot.add(ballots);
+
+        if (pool.selfBallots >= minSelfBallots && pool.enabled) {
+           _sortedEnabledValidators.improveRanking(poolInfos, _val);
+        }
+
+        emit DepositMargin(msg.sender, _val, msg.value);
+    }
+
+    
+    
+    // @param _val validator address
+    // @param _amount is an integer of votes
+    function redeemMargin(address _val, uint256 _amount) external nonReentrant {
+        require(_amount > 0 , "Validators: redeem amount must be greater than 0");
+        require(msg.sender == poolInfos[_val].manager, "pool does not exist or msg.sender is not the manager of the pool");
+
+        PoolInfo storage pool = poolInfos[_val];
+        require(_amount <= pool.selfBallots, "Validators: invalid amount.");
+
+        _validatorClaimReward(_val);
+
+        
+        if (isWithdrawable(_val, _val)) {
+            _withdrawMargin(msg.sender); // => redeemMargin
+        }
+
+
+        uint256 ballot = pool.suppliedBallots;
+        pool.suppliedBallots = ballot.sub(_amount);
+        totalBallot = totalBallot.sub(_amount);
+        pool.selfBallots = pool.selfBallots.sub(_amount);
+        pool.selfBallotsRewardsDebt = pool.accRewardPerShare.mul(pool.selfBallots).div(1e12);
+
+
+        if (pool.selfBallots < minSelfBallots) {
+            _sortedEnabledValidators.removeRanking(_val);
+        } else {
+            _sortedEnabledValidators.lowerRanking(poolInfos, _val);
+        }
+
+        _updateRevokingInfo(_val, _val, _amount,marginLockingDuration);
+
+        emit RedeemMargin(msg.sender, _val, _amount);
+    }
+
+    function _claimReward(address _val) internal {
+        UserInfo storage user = userInfo[_val][msg.sender];
+        
+        uint256 pending = _calculatePendingReward(_val, msg.sender);
+        require(pending > 0, "Validators: no pending reward to claim.");
+
+        
+        user.rewardDebt = user
+            .amount
+            .mul(poolInfos[_val].accRewardPerShare)
+            .div(1e12);
+        _safeTransfer(pending,msg.sender);
+
+        emit ClaimReward(msg.sender, _val, pending);
+    }
+
+    function updateCandidateInfo(
+        address _validator,
+        string memory details,
+        string memory website,
+        string memory email
+    ) external onlyAdmin {
+        require(bytes(details).length <= 3000, "description is too long");
+        require(bytes(website).length <= 100, "website is too long");
+        require(bytes(email).length <= 50, "email is too long");
+
+        Description storage desc = candidateInfos[_validator];
+
+        if (
+            bytes(details).length >= 0 &&
+            keccak256(bytes(details)) != keccak256(bytes(desc.details))
+        ) {
+            desc.details = details;
+        }
+        if (
+            bytes(website).length >= 0 &&
+            keccak256(bytes(website)) != keccak256(bytes(desc.website))
+        ) {
+            desc.website = website;
+        }
+        if (
+            bytes(email).length >= 0 &&
+            keccak256(bytes(email)) != keccak256(bytes(desc.email))
+        ) {
+            desc.email = email;
+        }
+
+        // @audit N2-2 Remove unused codes 
+
+        return;
+    }
+
+    function _calculateValidatorPendingReward(address _val)
+        internal
+        view
+        returns (uint256)
+    {
+        PoolInfo memory pool = poolInfos[_val];
+
+        return
+            // roundoff error - 
+            pool.selfBallots.mul(pool.accRewardPerShare).div(1e12).sub(
+                pool.selfBallotsRewardsDebt
+            );
+    }
+
+    function _validatorClaimReward(address _val) internal {
+        PoolInfo storage pool = poolInfos[_val];
+
+        // 
+        uint256 pending = _calculateValidatorPendingReward(_val); // roundoff error - 
+        if (pending > 0) {
+            // @audit PVE003 
+            _safeTransfer(pending,pool.manager);
+        }
+        // 
+        // roundoff error -
+        pool.selfBallotsRewardsDebt = pool.selfBallots.mul(pool.accRewardPerShare).div(1e12);
+        emit ValidatorClaimReward(_val, pending);
+    }
+
+    function _setPoolStatus(address _val, bool _enabled) internal {
+        PoolInfo storage pool = poolInfos[_val];
+        if (pool.enabled != _enabled) {
+            pool.enabled = _enabled;
+
+            if (!_enabled) {
+                _sortedEnabledValidators.removeRanking(_val);
+            } else {
+                _sortedEnabledValidators.improveRanking(poolInfos, _val);
+            }
+        }
+        emit SetPoolStatus(_val, _enabled);
+    }
+
+    function _updateRevokingInfo(address _user, address _val, uint256 _amount, uint256 lockingDuration) internal {
+        RevokingInfo storage revokingInfoItem = revokingInfo[_user][_val];
+        // 
+        revokingInfoItem.amount = revokingInfoItem.amount.add(_amount);
+        revokingInfoItem.lockingEndTime = block.timestamp.add(
+            lockingDuration
+        ); // solhint-disable not-rely-on-time
+    
+        // emit event
+        emit Revoke(
+            _user,
+            _val,
+            revokingInfoItem.amount,
+            revokingInfoItem.lockingEndTime
+        );
+    }
+
+    function withdrawMargin(address _val) external nonReentrant {
+        PoolInfo storage pool = poolInfos[_val];
+        require(pool.validator == _val, "no such pool");
+        require(pool.manager == msg.sender, "operation is only allowed by manager");
+        if(isWithdrawable(_val, _val)){
+            _withdrawMargin(_val);
+        }  
+    }
+
+    function _withdrawMargin(address _val) internal {
+        RevokingInfo storage revokingInfoItem = revokingInfo[_val][_val];
+
+        uint256 amount = revokingInfoItem.amount;
+
+        revokingInfoItem.amount = 0;
+
+        _safeTransfer(amount.mul(VOTE_UNIT),msg.sender);
+    }
+
+    // claim the Ballot Rewards of a validator's SelfBallots 
+    // @param _val validator address 
+    function claimSelfBallotsReward(address _val) external nonReentrant{
+        PoolInfo storage pool = poolInfos[_val];
+
+        require(pool.validator == _val, "no such pool");
+        require(msg.sender == pool.manager, "only the pool manager can claim rewards" );
+
+        _validatorClaimReward(_val);
+    }
+
+
+    // pool getters 
+
+    function getPoolSelfBallots(address val) public view returns (uint256) {
+        return poolInfos[val].selfBallots;
+    }
+
+    function getPoolSelfBallotsRewardsDebt(address val)
+        public
+        view
+        returns (uint256)
+    {
+        return poolInfos[val].selfBallotsRewardsDebt;
+    }
+
+    function getPoolfeeShares(address val) public view returns (uint256) {
+        return poolInfos[val].feeShares;
+    }
+
+    function getPoolpendingFee(address val) public view returns (uint256) {
+        return poolInfos[val].pendingFee;
+    }
+
+    function getPoolfeeDebt(address val) public view returns (uint256) {
+        return poolInfos[val].feeDebt;
+    }
+
+    function getPoollastRewardBlock(address val) public view returns (uint256) {
+        return poolInfos[val].lastRewardBlock;
+    }
+
+    function getPoolfeeSettLockingEndTime(address val)
+        public
+        view
+        returns (uint256)
+    {
+        return poolInfos[val].feeSettLockingEndTime;
+    }
+
+    function getPoolsuppliedBallot(address val) public view returns (uint256) {
+        return poolInfos[val].suppliedBallots;
+    }
+
+    function getPoolaccRewardPerShare(address val)
+        public
+        view
+        returns (uint256)
+    {
+        return poolInfos[val].accRewardPerShare;
+    }
+
+    function getPoolvoterNumber(address val) public view returns (uint256) {
+        return poolInfos[val].voterNumber;
+    }
+
+    function getPoolelectedNumber(address val) public view returns (uint256) {
+        return poolInfos[val].electedNumber;
+    }
+
+    function getPoolenabled(address val) public view returns (bool) {
+        return poolInfos[val].enabled;
+    }
+
+    function getPoolManager(address val) public view returns (address) {
+        return poolInfos[val].manager;
     }
 }

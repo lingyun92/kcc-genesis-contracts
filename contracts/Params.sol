@@ -1,60 +1,57 @@
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.6.0 <0.8.0;
 
-contract Params {
-    bool public initialized;
+import "./interfaces/IValidators.sol";
+import "./interfaces/IPunish.sol";
+import "./interfaces/IProposal.sol";
+import "./interfaces/IReservePool.sol";
+import "@openzeppelin/contracts-ethereum-package/contracts/Initializable.sol";
+ 
+contract Params is Initializable {
 
-    // System contracts
-    address public constant ValidatorContractAddr = 0x000000000000000000000000000000000000f000;
-    address public constant PunishContractAddr = 0x000000000000000000000000000000000000f111;
-    address public constant ProposalContractAddr = 0x000000000000000000000000000000000000f222;
-
-    // FeeRecoder
-    address public constant FeeRecoder = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
+    // System contracts addresses 
+    IValidators public  VALIDATOR_CONTRACT; // solhint-disable var-name-mixedcase
+    IPunish public  PUBLISH_CONTRACT;       // solhint-disable var-name-mixedcase
+    IProposal public  PROPOSAL_CONTRACT;    // solhint-disable var-name-mixedcase
+    IReservePool public RESERVEPOOL_CONTRACT; // solhint-disable var-name-mixedcase
+    uint256 public EPOCH; // solhint-disable var-name-mixedcase
 
     // System params
-    uint16 public constant MaxValidators = 29;
-    // Validator have to wait StakingLockPeriod blocks to withdraw staking
-    uint64 public constant StakingLockPeriod = 86400;
-    // Validator have to wait WithdrawProfitPeriod blocks to withdraw his profits
-    uint64 public constant WithdrawProfitPeriod = 28800;
-    uint256 public constant MinimalStakingCoin = 32 ether;
+    uint16 public constant MAX_VALIDATORS = 29;
 
     modifier onlyMiner() {
         require(msg.sender == block.coinbase, "Miner only");
         _;
     }
 
-    modifier onlyNotInitialized() {
-        require(!initialized, "Already initialized");
-        _;
-    }
-
-    modifier onlyInitialized() {
-        require(initialized, "Not init yet");
-        _;
-    }
-
     modifier onlyPunishContract() {
-        require(msg.sender == PunishContractAddr, "Punish contract only");
+        require(msg.sender == address(PUBLISH_CONTRACT), "Punish contract only");
         _;
     }
 
-    modifier onlyBlockEpoch(uint256 epoch) {
-        require(block.number % epoch == 0, "Block epoch only");
+    modifier onlyBlockEpoch {
+        require(block.number % EPOCH == 0, "Block epoch only");
         _;
     }
 
     modifier onlyValidatorsContract() {
-        require(
-            msg.sender == ValidatorContractAddr,
-            "Validators contract only"
-        );
+        require(msg.sender == address(VALIDATOR_CONTRACT), "Validators contract only");
         _;
+
     }
 
-    modifier onlyProposalContract() {
-        require(msg.sender == ProposalContractAddr, "Proposal contract only");
-        _;
+    function _setAddressesAndEpoch(
+            address _validatorsContract,
+            address _punishContract,
+            address _proposalContract,
+            address _reservePool,
+            uint256 epoch
+    ) internal initializer{
+        VALIDATOR_CONTRACT = IValidators(payable(_validatorsContract));
+        PUBLISH_CONTRACT = IPunish(payable(_punishContract));
+        PROPOSAL_CONTRACT = IProposal(payable(_proposalContract));
+        RESERVEPOOL_CONTRACT = IReservePool(payable(_reservePool));
+        EPOCH = epoch;
     }
+
 }
