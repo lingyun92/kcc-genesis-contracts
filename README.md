@@ -37,3 +37,5 @@ Generate ABI:
 ```
 npx hardhat abi-gen
 ```
+
+[Audit report](./audit/PeckShield-Audit-Report-KCC-v1.0.pdf)
