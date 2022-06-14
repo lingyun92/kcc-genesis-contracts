@@ -75,5 +75,7 @@ interface IValidators {
 
     function getActiveValidators() external view returns (address[] memory);
 
+    function getPoolenabled(address val) external view returns (bool);
+
 }
 

@@ -300,8 +300,174 @@ describe("validators: test voter claim reward", function () {
 
 
 
-    it("revoke vote", async function () {
+    it("vote with 1.5 KCS", async function () {
+
+        // validator and voter to play with 
+        const [val,] = initialValidators;
+        const [user,] = voters;
+
+        // the balance before voting 
+        const preBalance = await user.getBalance();
+
+        await validatorContract.connect(user).vote(val.address,{
+            value: ethers.utils.parseEther("1.5"),
+            gasPrice: BigNumber.from(0), // hack with 0 gas price 
+        });
+
+        const afterBalance = await user.getBalance();
+
+        expect(
+            preBalance.sub(afterBalance),
+            "0.5 KCS should be returned"
+        ).eq(
+            ethers.utils.parseEther("1.0")
+        )
+        
+    });
+
+    it("automatically claim pending rewards when user votes", async function () {
+
+        // validator and voter to play with 
+        const [val,] = initialValidators;
+        const [user,miner] = voters;
+
+        await validatorContract.connect(user).vote(val.address,{
+            value: ethers.utils.parseEther("1"),
+            gasPrice: BigNumber.from(0), // hack with 0 gas price 
+        });
+
+        expect(
+            await validatorContract.pendingReward(val.address,user.address),
+            "there is no pending rewards before distributeBlockRewards"
+        ).eq(
+            BigNumber.from(0)
+        )
+
+        // Distribute some rewards  
+        await setCoinbase(miner.address);
+        await reservePoolMock.setBlockReward(ethers.utils.parseEther("6"));
+        await validatorContract.connect(miner).distributeBlockReward();
+
+        // user's pending rewards 
+        const pendingRewards = await validatorContract.pendingReward(val.address,user.address);
+        expect(pendingRewards).gt(BigNumber.from(0));
+        
+        // automatically claim pending rewards on voting 
+
+        const preBlance = await user.getBalance();
+
+        // vote 1 KCS 
+        await validatorContract.connect(user).vote(val.address,{
+                value: ethers.utils.parseEther("1"),
+                gasPrice: BigNumber.from(0),
+            });
+
+        const afterBalance = await user.getBalance();
+
+        expect(
+            afterBalance.add(ethers.utils.parseEther("1")).sub(pendingRewards),
+            "automatically claim pending rewards on voting "
+        ).eq(
+            preBlance
+        )
+
 
     });
+
+
+    it("automatically claim pending rewards when user revokes",async function () {
+
+        // validator and voter to play with 
+        const [val,] = initialValidators;
+        const [user,miner] = voters;
+
+        await validatorContract.connect(user).vote(val.address,{
+            value: ethers.utils.parseEther("1"),
+            gasPrice: BigNumber.from(0), // hack with 0 gas price 
+        });
+
+        expect(
+            await validatorContract.pendingReward(val.address,user.address),
+            "there is no pending rewards before distributeBlockRewards"
+        ).eq(
+            BigNumber.from(0)
+        )
+
+        // Distribute some rewards  
+        await setCoinbase(miner.address);
+        await reservePoolMock.setBlockReward(ethers.utils.parseEther("6"));
+        await validatorContract.connect(miner).distributeBlockReward();
+
+        // user's pending rewards 
+        const pendingRewards = await validatorContract.pendingReward(val.address,user.address);
+        expect(pendingRewards).gt(BigNumber.from(0));
+        
+        // automatically claim pending rewards on voting 
+
+        const preBlance = await user.getBalance();
+
+        // revoke 1 KCS 
+        await validatorContract.connect(user).revokeVote(val.address, 1,{
+                gasPrice: BigNumber.from(0),
+        });
+
+        const afterBalance = await user.getBalance();
+
+        expect(
+            afterBalance.sub(pendingRewards),
+            "automatically claim pending rewards on reVoking "
+        ).eq(
+            preBlance
+        )
+
+    });
+
+
+    it("automatically withdraw previous reovoked when revoke", async()=>{
+
+
+        // validator and voter to play with 
+        const [val,] = initialValidators;
+        const [user,miner] = voters;
+
+        // vote 2 KCS 
+        await validatorContract.connect(user).vote(val.address,{
+            value: ethers.utils.parseEther("2"),
+            gasPrice: BigNumber.from(0), // hack with 0 gas price 
+        });
+
+        // revoke 1 KCS 
+        await validatorContract.connect(user).revokeVote(val.address, 1,{
+                gasPrice: BigNumber.from(0),
+        });
+
+        // wait for 3 days 
+        await mineBlocks(3 * 24 * 60 * 60 / 3 + 1);
+
+        expect(
+            await validatorContract.connect(user).isWithdrawable(user.address,val.address),
+        ).equal(
+            true
+        )
+
+        const preBalance =await user.getBalance();
+
+        // reovoke another KCS 
+        await validatorContract.connect(user).revokeVote(val.address,1,
+            {
+                gasPrice: 0
+            }
+        )
+
+        const afterBalance = await user.getBalance();
+
+        expect(
+            afterBalance.sub(preBalance)
+        ).eq(
+            ethers.constants.WeiPerEther
+        );
+
+    });
+
 
 });

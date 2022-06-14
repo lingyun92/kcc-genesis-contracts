@@ -9,18 +9,18 @@ import {
     CallDistributeBlockRewardMultipleTimes,
     ReservePoolMockForValidators
 } from "../typechain";
-import {ethers} from "hardhat";
+import { ethers } from "hardhat";
 import {mineBlocks, setBalance, setCoinbase} from "./helpers";
-import {expect} from "chai";
-import {BigNumber} from "ethers";
+import {assert, expect} from "chai";
+import {BigNumber, Contract} from "ethers";
 
 type SignerWithAddress = Awaited<ReturnType<typeof ethers["getSigner"]>>;
 
 describe("validators: test punish", function () {
 
     // the validators contract
-    let validatorContract: Validators;
-    let reservePoolMock : ReservePoolMockForValidators;
+    let validatorContract: Contract;
+    let reservePoolMock : Contract;
     let deployer: SignerWithAddress;
     let admin: SignerWithAddress;
     let miner: SignerWithAddress;
@@ -54,7 +54,7 @@ describe("validators: test punish", function () {
     
         // initial KCS in contract 
         await setBalance(validatorContract.address, MIN_SELF_BALLOTS_IN_KCS.mul(initialValidators.length));
-        await setBalance(reservePoolMock.address, ethers.constants.WeiPerEther.mul(7));
+        await setBalance(reservePoolMock.address, ethers.constants.WeiPerEther.mul(7 * 3 * 100));
 
 
         validatorSet = initialValidators.map(v => v.address)
@@ -72,39 +72,133 @@ describe("validators: test punish", function () {
 
     });
 
-    // it("only punish reward", async function () {
-    //
-    //
-    //     // mining a block and distribute this block's reward
-    //     let times = 3
-    //     for (let i = 0; i < times; i++) {
-    //         await setCoinbase(miner.address);
-    //         await validatorContract.connect(miner).distributeBlockReward();
-    //     }
-    //
-    //     let pendingFee = await validatorContract.getPoolpendingFee(validatorSet[0])
-    //
-    //
-    //
-    //     //await validatorContract.connect(validatorSet[0]).claimSelfBallotsReward(validatorSet[0])
-    //
-    //
-    //     //let debate = await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]);
-    //
-    //     console.log(pendingFee);
-    //     await validatorContract.connect(punishContract).punish(validatorSet[0], false);
-    //     let maxPunishmentAmount = await validatorContract.maxPunishmentAmount();
-    //     console.log(pendingFee);
-    //     // console.log(maxPunishmentAmount);
-    //     // console.log(await validatorContract.getPoolpendingFee(validatorSet[0]));
-    //     expect(await validatorContract.getPoolpendingFee(validatorSet[0])).to.equal(pendingFee.add(maxPunishmentAmount));
-    //
-    //     console.log(await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]));
-    //     //expect(await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]), "self ballot debate ").to.greaterThan(BigNumber.from(debate));
-    //
-    //
-    //
-    // });
+    it("pending reward greater than maxPunishmentAmount", async function () {
+
+
+        // set setMaxPunishmentAmount = 1 kcs
+        await validatorContract.connect(admin).setMaxPunishmentAmount(ethers.utils.parseEther("1"), {gasPrice: 0});
+        let maxPunishmentAmount = await validatorContract.maxPunishmentAmount();
+        //console.log("maxPunishmentAmount: ", maxPunishmentAmount);
+
+        const before = await ethers.provider.getBalance(validatorSet[0])
+        //console.log("validator's balance: ", before);
+        // mining block and distribute this block's reward
+        while ((await validatorContract.getPoolpendingFee(validatorSet[0])).lt(maxPunishmentAmount)) {
+            await setCoinbase(miner.address);
+            await validatorContract.connect(miner).distributeBlockReward();
+        }
+
+        //console.log("before punish, pending fee: ", await validatorContract.getPoolpendingFee(validatorSet[0]))
+
+
+        // const beforePunish = await ethers.provider.getBalance(punishContract.address);
+        // console.log("beforePunish: ", beforePunish)
+        await validatorContract.connect(punishContract).punish(validatorSet[0], false, {gasPrice: 0});
+        let pendingFee = await validatorContract.getPoolpendingFee(validatorSet[0])
+        // expect((await ethers.provider.getBalance(punishContract.address)).eq(beforePunish.add(maxPunishmentAmount)));
+        // console.log("after punish: ", await ethers.provider.getBalance(punishContract.address));
+
+        if ((await validatorContract.getPoolpendingFee(validatorSet[0])).gt(0)) {
+            await validatorContract.connect(initialValidators[0]).claimFeeReward(validatorSet[0], {gasPrice: 0})
+        }
+
+        //console.log("after punish, pending fee: ", await validatorContract.getPoolpendingFee(validatorSet[0]))
+
+
+        expect(await ethers.provider.getBalance(validatorSet[0])).to.be.equal(pendingFee.add(before));
+
+
+        // continue to distribute block rewards
+        await setCoinbase(miner.address);
+        await validatorContract.connect(miner).distributeBlockReward();
+
+        const balance = await ethers.provider.getBalance(validatorSet[0]);
+        const pending = await validatorContract.getPoolpendingFee(validatorSet[0])
+        //console.log("pending: ", pending)
+
+        await validatorContract.connect(initialValidators[0]).claimFeeReward(validatorSet[0], {gasPrice: 0})
+
+        expect((await ethers.provider.getBalance(validatorSet[0]))).to.be.equal(balance.add(pending));
+
+    });
+
+
+    it('the sum of pending rewards and selfBallotsRewards was less than maxPunishmentAmount', async function () {
+        // set setMaxPunishmentAmount = 2 kcs
+        await validatorContract.connect(admin).setMaxPunishmentAmount(ethers.utils.parseEther("2"), {gasPrice: 0});
+        let maxPunishmentAmount = await validatorContract.maxPunishmentAmount();
+        //console.log("maxPunishmentAmount: ", maxPunishmentAmount);
+
+        const before = await ethers.provider.getBalance(validatorSet[0])
+        //console.log("validator's balance: ", before);
+
+        // distribute block rewards
+        await setCoinbase(miner.address);
+        await validatorContract.connect(miner).distributeBlockReward();
+
+        const pendingFee = await validatorContract.getPoolpendingFee(validatorSet[0])
+        //console.log("pendingFee: ", pendingFee);
+
+        // assert pendingFee < maxPunishmentAmount
+        console.assert(pendingFee.lt(maxPunishmentAmount));
+        //expect(pendingFee.lt(maxPunishmentAmount)).to.be.true;
+
+        const accRewardPerShare = await validatorContract.getPoolaccRewardPerShare(validatorSet[0]);
+        const selfBallots = await validatorContract.getPoolSelfBallots(validatorSet[0]);
+        const selfBallotsRewardsDebt = await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]);
+
+        const selfBallotsReward = accRewardPerShare.mul(selfBallots).div(1e12).sub(selfBallotsRewardsDebt);
+        //console.log("selfBallotsReward: ", selfBallotsReward);
+
+        console.assert(selfBallotsReward.lt(maxPunishmentAmount.sub(pendingFee)));
+        expect(selfBallotsReward.lt(maxPunishmentAmount.sub(pendingFee))).to.be.true;
+
+
+        await validatorContract.connect(punishContract).punish(validatorSet[0], false, {gasPrice: 0});
+
+        expect((await validatorContract.getPoolpendingFee(validatorSet[0]))).to.be.eq(0);
+        expect((await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]))).to.be.eq(selfBallotsRewardsDebt.add(selfBallotsReward));
+
+    });
+
+    it('the sum of pending rewards and selfBallotsRewards was greater than maxPunishmentAmount', async function () {
+
+        // set setMaxPunishmentAmount = 0.8 kcs
+        await validatorContract.connect(admin).setMaxPunishmentAmount(ethers.utils.parseEther("0.8"), {gasPrice: 0});
+        let maxPunishmentAmount = await validatorContract.maxPunishmentAmount();
+        //console.log("maxPunishmentAmount: ", maxPunishmentAmount);
+
+        const before = await ethers.provider.getBalance(validatorSet[0])
+        //console.log("validator's balance: ", before);
+
+        // distribute block rewards
+        await setCoinbase(miner.address);
+        await validatorContract.connect(miner).distributeBlockReward();
+
+        const pendingFee = await validatorContract.getPoolpendingFee(validatorSet[0])
+        //console.log("pendingFee: ", pendingFee);
+
+        // assert pendingFee < maxPunishmentAmount
+        console.assert(pendingFee.lt(maxPunishmentAmount));
+        //expect(pendingFee.lt(maxPunishmentAmount)).to.be.true;
+
+        const accRewardPerShare = await validatorContract.getPoolaccRewardPerShare(validatorSet[0]);
+        const selfBallots = await validatorContract.getPoolSelfBallots(validatorSet[0]);
+        const selfBallotsRewardsDebt = await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]);
+
+        const selfBallotsReward = accRewardPerShare.mul(selfBallots).div(1e12).sub(selfBallotsRewardsDebt);
+        //console.log("selfBallotsReward: ", selfBallotsReward);
+
+        console.assert(selfBallotsReward.gt(maxPunishmentAmount.sub(pendingFee)));
+        expect(selfBallotsReward.gt(maxPunishmentAmount.sub(pendingFee))).to.be.true;
+
+
+        await validatorContract.connect(punishContract).punish(validatorSet[0], false, {gasPrice: 0});
+
+        expect((await validatorContract.getPoolpendingFee(validatorSet[0]))).to.be.eq(0);
+        expect((await validatorContract.getPoolSelfBallotsRewardsDebt(validatorSet[0]))).to.be.eq(selfBallotsRewardsDebt.add(maxPunishmentAmount.sub(pendingFee)));
+
+    });
 
     it("punish reward and remove from top active validator set", async function () {
         await validatorContract.connect(punishContract).punish(validatorSet[0], true);
@@ -131,7 +225,7 @@ describe("validators: test punish", function () {
 
         await validatorContract.distributeBlockReward();
 
-        expect(await ethers.provider.getBalance(reservePoolMock.address)).to.equal(BigNumber.from(0));
+        //expect(await ethers.provider.getBalance(reservePoolMock.address)).to.equal(BigNumber.from(0));
 
         // the selfBallots of each validator
         const selfBallotsPerPool = MIN_SELF_BALLOTS;
@@ -195,21 +289,9 @@ describe("validators: test punish", function () {
 
 
         expect(await ethers.provider.getBalance(validatorContract.address)).to.equal(MIN_SELF_BALLOTS_IN_KCS.mul(7).add(blockReward).sub(blockReward));
-        expect(await ethers.provider.getBalance(reservePoolMock.address)).to.equal(blockReward);
+        //expect(await ethers.provider.getBalance(reservePoolMock.address)).to.equal(blockReward);
 
 
-        // for(let i =0; i < numOfActiveValidators; ++i) {
-        //     const val = initialValidators[i].address;
-        //
-        //     expect(await validatorContract.getPoolpendingFee(val),
-        //         "check pending commission fee of each pool")
-        //         .to.be.equal(feeRewardPerPool);
-        //
-        //     expect(await validatorContract.getPoolaccRewardPerShare(val),
-        //         "check accRewardPerShare of each pool ")
-        //         .to.be.equal(accRewardPerSharePerPool);
-        //
-        // }
 
     });
 

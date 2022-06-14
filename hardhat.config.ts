@@ -6,11 +6,14 @@ import "@nomiclabs/hardhat-waffle";
 import "@typechain/hardhat";
 import "hardhat-gas-reporter";
 import "solidity-coverage";
-import { BigNumber } from "ethers"
+import { BigNumber, utils} from "ethers"
 import { fstatSync, mkdirSync, writeFileSync } from "fs";
 import {join} from "path";
 import keyethereum from "keythereum";
 import  {readFileSync}  from 'fs';
+import 'hardhat-storage-layout';
+import {Md5} from 'ts-md5/dist/md5';
+import  fs from "fs";
 
 
 dotenv.config();
@@ -25,6 +28,27 @@ task("accounts", "Prints the list of accounts", async (taskArgs, hre) => {
   }
 
 });
+
+
+// Calculate md5sum of byte codes
+task("md5sum", "Calculate the md5sum of byte codes", async(taskArgs,hre) => {
+
+  const files = [
+   "bin/proposal_deployed_code",
+   "bin/punish_deployed_code",
+   "bin/reservePool_deployed_code",
+   "bin/validators_deployed_code",
+  ]
+
+  for(let i =0; i < files.length; ++i){
+    const bytes = utils.arrayify(fs.readFileSync(files[i],"utf8"));
+    const hex = (new Md5()).appendByteArray(bytes).end(false);
+    console.log(`${files[i]}: ${hex}`);
+  }
+  
+
+})
+
 
 // task for generating abi.json
 task("abi-gen", "Generate abi.json", async (taskArgs, hre) => {
@@ -93,11 +117,12 @@ const config: HardhatUserConfig = {
         count: 100,
         accountsBalance: BigNumber.from(10).pow(25).toString()
       },
-      hardfork: "berlin" // kcc 
+      hardfork: "berlin", // kcc 
+      chainId: 1337
     },
     devnet:{
       url: process.env.DEVNET_RPC || "",
-      // accounts : (process.env.DENET_PRIVATE_KEYS || "").split(','),
+      accounts : (process.env.DENET_PRIVATE_KEYS || "0xa3f5fbad1692c5b72802300aefb5b760364018018ddb5fe7589a2203d0d10e60").split(','),
     },
   },
   gasReporter: {

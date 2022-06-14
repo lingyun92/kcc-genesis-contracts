@@ -10,5 +10,9 @@ contract ValidatorMockForPunish {
         emit CallPunish(validator, remove);
     }
 
+    function getPoolenabled(address val) external view returns (bool) {
+        return true;
+    }
+
 
 }

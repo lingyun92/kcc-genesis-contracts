@@ -7,4 +7,6 @@ contract PunishMockForValidator {
     function punish(address validator, bool remove) external{
         emit CallPunish(validator, remove);
     }
+
+    receive() external payable{}
 }

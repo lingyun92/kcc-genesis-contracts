@@ -5,7 +5,7 @@
 import {ProposalMockForValidators, ReservePoolMockForValidators, Validators} from "../typechain";
 import {ethers} from "hardhat";
 import {getLastBlockInfo, mineBlocks, setBalance, setCoinbase} from "./helpers";
-import {BigNumber} from "ethers";
+import {BigNumber, utils} from "ethers";
 import {expect} from "chai";
 import { contains } from "underscore";
 import { time } from "console";
@@ -25,6 +25,7 @@ describe("valdiators: deposit & redeem margin, claim fees", function (){
     let initialValidators: SignerWithAddress[];
     let candidates: SignerWithAddress[]; // candidates for validators
     let candidateA: SignerWithAddress; // candidates for validators
+    let voterA : SignerWithAddress, voterB:SignerWithAddress;
     let p1: string;
 
 
@@ -39,7 +40,7 @@ describe("valdiators: deposit & redeem margin, claim fees", function (){
 
         const signers = await ethers.getSigners();
         let others: SignerWithAddress[];
-        [deployer, admin, manager, ...others] = signers;
+        [deployer, admin, manager, voterA,voterB, ...others] = signers;
 
         validatorContract = await (await ethers.getContractFactory("Validators", deployer)).deploy();
         proposalMock = await (await ethers.getContractFactory("ProposalMockForValidators", deployer)).deploy();
@@ -379,7 +380,54 @@ describe("valdiators: deposit & redeem margin, claim fees", function (){
 
 
     it("order change in top validators when deposit & redeem",async function(){
-        console.log("TODO!!!");
+        
+        // Get the list of top Validators from fixture
+        let topValidators = await validatorContract.getTopValidators();
+
+
+        // Voter B vote 10 for each validator 
+        for(let i =0; i< topValidators.length; ++i){
+            await validatorContract.connect(voterB).vote(topValidators[i],
+                {
+                    value: utils.parseEther("20"),
+                }
+            )
+        }
+
+        // The order may change 
+        topValidators = await validatorContract.getTopValidators();
+
+        // Get the previous last validator 
+        const preLastVal = topValidators[topValidators.length - 1];
+
+        await validatorContract.connect(voterA).vote(preLastVal,{
+            value: utils.parseEther("20"), // vote 20 for preLastVal
+        });
+
+        topValidators = await validatorContract.getTopValidators();
+
+        expect(
+            preLastVal,
+            "The last one is now the first"
+        ).eq(
+            topValidators[0]
+        )        
+        
+        const firstVal = preLastVal;
+
+        // voteA revokes 20 KCS  
+        await validatorContract.connect(voterA).revokeVote(firstVal,20);
+        // voterB revokes 10 KCS
+        await validatorContract.connect(voterB).revokeVote(firstVal,10);
+
+        topValidators = await validatorContract.getTopValidators();
+
+        expect(
+            firstVal,
+            "The fist one is now the last"
+        ).eq(
+            topValidators[topValidators.length - 1]
+        )  
     });
 
 

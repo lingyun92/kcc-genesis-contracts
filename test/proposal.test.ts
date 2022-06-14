@@ -4,6 +4,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import {Proposal, ValidatorMockForProposal} from "../typechain";
+import {Contract} from "ethers";
 
 type SignerWithAddress = Awaited<ReturnType<typeof ethers["getSigner"]>>;
 
@@ -13,11 +14,11 @@ describe("Test proposal", function () {
     let owner: SignerWithAddress;
     let admin: SignerWithAddress;
     let validator: SignerWithAddress;
-    let validatorMockContract: ValidatorMockForProposal;
+    let validatorMockContract: Contract;
     let punishContract: SignerWithAddress;
     let proposalContract: SignerWithAddress;
     let reservePoolContract: SignerWithAddress;
-    let proposal: Proposal;
+    let proposal: Contract;
 
     let val1: SignerWithAddress;
     let val2: SignerWithAddress;

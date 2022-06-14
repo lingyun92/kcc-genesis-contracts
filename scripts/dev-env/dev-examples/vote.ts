@@ -1,7 +1,7 @@
 
 import { ethers } from "hardhat";
 
-// vote two ballots to the first validator 
+// Two votes to the first active validator. 
 async function main() {
 
     const actor = (await ethers.getSigners())[0];

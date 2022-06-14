@@ -1,5 +1,6 @@
 import { network , ethers} from "hardhat";
 import { BigNumber,BigNumberish } from "ethers"
+import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 
 
 
@@ -39,4 +40,19 @@ export async function setBalance(address:string, value:BigNumber){
         address,
         ethers.utils.hexStripZeros(value.toHexString())
     ]);
+}
+
+/// deploy `contractName` to   `address` 
+export async function deployContractToAddress(address:string, contractName: 'Proposal'|'Punish'|'ReservePool'|'Validators', signer:SignerWithAddress ){
+
+    const factory = await ethers.getContractFactory(contractName,signer);
+    const dummyContract = await factory.deploy();
+
+    const bin = await ethers.provider.getCode(dummyContract.address);
+    await network.provider.send("hardhat_setCode", [
+        address,
+        bin,
+      ]);
+
+    return ethers.getContractAt(contractName,address,signer);
 }

@@ -55,6 +55,11 @@ contract Punish is Params, Admin {
     onlyNotPunished
     {
         _punished[block.number] = true;
+
+        // Don't punish the validator again who was jailed
+        if (!VALIDATOR_CONTRACT.getPoolenabled(_val)) {
+            return;
+        }
         if (!_punishRecords[_val].exist) {
             _punishRecords[_val].index = punishValidators.length;
             punishValidators.push(_val);

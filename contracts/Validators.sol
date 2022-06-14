@@ -161,7 +161,7 @@ contract Validators is
     ) external initializer {
         require(
             _validators.length == _feeShares.length && _validators.length == _managers.length && _validators.length > 0,
-            "invalidate validator and it's manager"
+            "invalid validator and it's manager"
         );
 
         revokeLockingDuration = 3 days;
@@ -413,7 +413,7 @@ contract Validators is
         // @audit PVE001-2 : only the manager of the validator can change the fee shares 
         PoolInfo storage pool = poolInfos[_val];
         require(msg.sender == pool.manager, "only manager can change it");
-        require(!pool.enabled, "pool does not enabled");
+        require(pool.enabled, "pool is not enabled");
         require(pool.validator != address(0), "Pool does not exist");
         require(
             _shares <= MAX_FEE_SHARES,
@@ -464,7 +464,9 @@ contract Validators is
             uint256 _totalBallot = 0;
             for (uint8 i = 0; i < activeValidators.length; i++) {
                 PoolInfo storage pool = poolInfos[activeValidators[i]];
-                if(pool.selfBallots >= minSelfBallots){ // only taking validator with enough margin into accounts
+
+                // Distribute block rewards only to validators that have enough ballots and are enabled
+                if (pool.selfBallots >= minSelfBallots && pool.enabled) {
                     _totalBallot = _totalBallot.add(poolInfos[activeValidators[i]].suppliedBallots);
                 }
             }
@@ -476,7 +478,7 @@ contract Validators is
                 for (uint8 i = 0; i < activeValidators.length; i++) {
                     PoolInfo storage pool = poolInfos[activeValidators[i]];
 
-                    if(pool.selfBallots < minSelfBallots){
+                    if (pool.selfBallots < minSelfBallots || !pool.enabled) {
                         continue;
                     }
 
@@ -1131,7 +1133,7 @@ contract Validators is
 
     // pool getters 
 
-    function getPoolSelfBallots(address val) public view returns (uint256) {
+    function getPoolSelfBallots(address val) external view returns (uint256) {
         return poolInfos[val].selfBallots;
     }
 
@@ -1143,55 +1145,47 @@ contract Validators is
         return poolInfos[val].selfBallotsRewardsDebt;
     }
 
-    function getPoolfeeShares(address val) public view returns (uint256) {
+    function getPoolfeeShares(address val) external view returns (uint256) {
         return poolInfos[val].feeShares;
     }
 
-    function getPoolpendingFee(address val) public view returns (uint256) {
+    function getPoolpendingFee(address val) external view returns (uint256) {
         return poolInfos[val].pendingFee;
     }
 
-    function getPoolfeeDebt(address val) public view returns (uint256) {
+    function getPoolfeeDebt(address val) external view returns (uint256) {
         return poolInfos[val].feeDebt;
     }
 
-    function getPoollastRewardBlock(address val) public view returns (uint256) {
+    function getPoollastRewardBlock(address val) external view returns (uint256) {
         return poolInfos[val].lastRewardBlock;
     }
 
-    function getPoolfeeSettLockingEndTime(address val)
-        public
-        view
-        returns (uint256)
-    {
+    function getPoolfeeSettLockingEndTime(address val) external view returns (uint256) {
         return poolInfos[val].feeSettLockingEndTime;
     }
 
-    function getPoolsuppliedBallot(address val) public view returns (uint256) {
+    function getPoolsuppliedBallot(address val) external view returns (uint256) {
         return poolInfos[val].suppliedBallots;
     }
 
-    function getPoolaccRewardPerShare(address val)
-        public
-        view
-        returns (uint256)
-    {
+    function getPoolaccRewardPerShare(address val) external view returns (uint256) {
         return poolInfos[val].accRewardPerShare;
     }
 
-    function getPoolvoterNumber(address val) public view returns (uint256) {
+    function getPoolvoterNumber(address val) external view returns (uint256) {
         return poolInfos[val].voterNumber;
     }
 
-    function getPoolelectedNumber(address val) public view returns (uint256) {
+    function getPoolelectedNumber(address val) external view returns (uint256) {
         return poolInfos[val].electedNumber;
     }
 
-    function getPoolenabled(address val) public view returns (bool) {
+    function getPoolenabled(address val) external view override returns (bool) {
         return poolInfos[val].enabled;
     }
 
-    function getPoolManager(address val) public view returns (address) {
+    function getPoolManager(address val) external view returns (address) {
         return poolInfos[val].manager;
     }
 }
